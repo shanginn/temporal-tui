@@ -29,6 +29,7 @@ governed by live evidence rather than a fixed Server row.
 ## Client and platforms
 
 - Rust 1.97.1, edition 2024.
+- Protobuf compiler 35.1 for source and release builds.
 - Temporal Rust client 0.5.0 (Public Preview).
 - Terminal minimum 58×16; release PTY coverage includes 80×24.
 - Artifacts: Linux x86_64, macOS ARM64, macOS x86_64, Windows x86_64 MSVC.
