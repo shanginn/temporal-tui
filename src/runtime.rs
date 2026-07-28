@@ -18,12 +18,26 @@ use tokio::{
 };
 
 use crate::{
-    app::{App, Command, Message, OperationKind, UtilityKind},
+    app::{App, Command, Message, OperationKind, ProfileConnectionInfo, UtilityKind},
+    config::ConfigStore,
     model::{ClusterInfo, WorkflowDetails},
-    service::TemporalService,
+    service::{GrpcTemporalService, TemporalService},
     terminal::TerminalSession,
     ui,
 };
+
+enum RuntimeMessage {
+    App(Message),
+    ProfileConnected {
+        request_id: u64,
+        result: Result<ConnectedProfile, String>,
+    },
+}
+
+struct ConnectedProfile {
+    service: Arc<dyn TemporalService>,
+    info: ProfileConnectionInfo,
+}
 
 /// Run the terminal event loop until the user quits.
 ///
@@ -34,10 +48,12 @@ use crate::{
 pub async fn run(
     terminal: &mut TerminalSession,
     mut app: App,
-    service: Arc<dyn TemporalService>,
+    initial_service: Arc<dyn TemporalService>,
+    config_store: ConfigStore,
 ) -> Result<()> {
+    let mut service = initial_service;
     let (message_tx, mut message_rx) = mpsc::channel(64);
-    dispatch_all(app.bootstrap(), &service, &message_tx);
+    dispatch_all(app.bootstrap(), &service, &config_store, &message_tx);
 
     let mut events = EventStream::new();
     let mut ticks = interval(Duration::from_millis(200));
@@ -57,7 +73,7 @@ pub async fn run(
                             if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) =>
                         {
                             let commands = app.handle_key(key);
-                            dispatch_all(commands, &service, &message_tx);
+                            dispatch_all(commands, &service, &config_store, &message_tx);
                             true
                         }
                         Some(Ok(Event::Resize(_, _))) => true,
@@ -69,15 +85,31 @@ pub async fn run(
                     }
                 }
                 Some(message) = message_rx.recv() => {
-                    let commands = app.handle_message(message);
-                    dispatch_all(commands, &service, &message_tx);
+                    let commands = match message {
+                        RuntimeMessage::App(message) => app.handle_message(message),
+                        RuntimeMessage::ProfileConnected { request_id, result } => {
+                            if app.expects_profile_switch(request_id) {
+                                let result = result.map(|connected| {
+                                    service = connected.service;
+                                    connected.info
+                                });
+                                app.handle_message(Message::ProfileSwitchFinished {
+                                    request_id,
+                                    result,
+                                })
+                            } else {
+                                Vec::new()
+                            }
+                        }
+                    };
+                    dispatch_all(commands, &service, &config_store, &message_tx);
                     true
                 }
                 _ = ticks.tick() => {
                     let had_notice = app.notice.is_some();
                     let commands = app.on_tick(std::time::Instant::now());
                     let changed = !commands.is_empty() || had_notice != app.notice.is_some();
-                    dispatch_all(commands, &service, &message_tx);
+                    dispatch_all(commands, &service, &config_store, &message_tx);
                     changed
                 }
             };
@@ -102,28 +134,95 @@ pub async fn run(
 fn dispatch_all(
     commands: Vec<Command>,
     service: &Arc<dyn TemporalService>,
-    sender: &mpsc::Sender<Message>,
+    config_store: &ConfigStore,
+    sender: &mpsc::Sender<RuntimeMessage>,
 ) {
     for command in commands {
-        dispatch(command, Arc::clone(service), sender.clone());
+        dispatch(
+            command,
+            Arc::clone(service),
+            config_store.clone(),
+            sender.clone(),
+        );
     }
 }
 
-fn dispatch(command: Command, service: Arc<dyn TemporalService>, sender: mpsc::Sender<Message>) {
-    tokio::spawn(async move {
-        let message = execute(command, service.as_ref()).await;
-        let _ = sender.send(message).await;
-    });
+fn dispatch(
+    command: Command,
+    service: Arc<dyn TemporalService>,
+    config_store: ConfigStore,
+    sender: mpsc::Sender<RuntimeMessage>,
+) {
+    if let Command::SwitchProfile {
+        request_id,
+        profile_name,
+    } = command
+    {
+        tokio::spawn(async move {
+            let result = connect_profile(config_store, profile_name).await;
+            let _ = sender
+                .send(RuntimeMessage::ProfileConnected { request_id, result })
+                .await;
+        });
+    } else {
+        tokio::spawn(async move {
+            let message = execute(command, service.as_ref()).await;
+            let _ = sender.send(RuntimeMessage::App(message)).await;
+        });
+    }
+}
+
+async fn connect_profile(
+    config_store: ConfigStore,
+    profile_name: String,
+) -> Result<ConnectedProfile, String> {
+    let resolution_name = profile_name.clone();
+    let resolved = tokio::task::spawn_blocking(move || {
+        let config = config_store.load()?;
+        config_store.resolve_profile(&config, &resolution_name)
+    })
+    .await
+    .map_err(|error| format!("profile resolution task failed: {error}"))?
+    .map_err(|error| format!("could not resolve profile/{profile_name}: {error}"))?;
+
+    let address = resolved.connection.address.clone();
+    let codec_enabled = resolved.connection.payload_codec.is_some();
+    let namespace = resolved.namespace;
+    let web_ui_url = resolved.web_ui_url;
+    let read_only = resolved.read_only;
+    let service = GrpcTemporalService::connect(resolved.connection)
+        .await
+        .map_err(|error| format!("could not connect profile/{profile_name}: {error}"))?;
+    service
+        .cluster_info()
+        .await
+        .map_err(|error| format!("could not verify profile/{profile_name}: {error}"))?;
+
+    Ok(ConnectedProfile {
+        service: Arc::new(service),
+        info: ProfileConnectionInfo {
+            name: profile_name,
+            address,
+            namespace,
+            read_only,
+            codec_enabled,
+            web_ui_url,
+        },
+    })
 }
 
 async fn execute(command: Command, service: &dyn TemporalService) -> Message {
     match command {
-        Command::LoadCluster => Message::ClusterLoaded(
-            service
+        Command::LoadCluster { request_id } => Message::ClusterLoaded {
+            request_id,
+            result: service
                 .cluster_info()
                 .await
                 .map_err(|error| error.to_string()),
-        ),
+        },
+        Command::SwitchProfile { .. } => {
+            unreachable!("profile switching is handled by the runtime dispatcher")
+        }
         Command::LoadNamespaces { request_id } => Message::NamespacesLoaded {
             request_id,
             result: service
@@ -273,6 +372,136 @@ async fn execute(command: Command, service: &dyn TemporalService) -> Message {
                 .describe_schedule(&namespace, &schedule_id)
                 .await
                 .map(Box::new)
+                .map_err(|error| error.to_string()),
+        },
+        Command::LoadSearchAttributes {
+            request_id,
+            namespace,
+        } => Message::SearchAttributesLoaded {
+            request_id,
+            result: service
+                .list_search_attributes(&namespace)
+                .await
+                .map_err(|error| error.to_string()),
+        },
+        Command::AddSearchAttribute {
+            request_id,
+            namespace,
+            name,
+            value_type,
+        } => Message::OperationFinished {
+            request_id,
+            operation: OperationKind::AddSearchAttribute,
+            result: service
+                .add_search_attribute(&namespace, &name, &value_type)
+                .await
+                .map_err(|error| error.to_string()),
+        },
+        Command::RemoveSearchAttribute {
+            request_id,
+            namespace,
+            name,
+        } => Message::OperationFinished {
+            request_id,
+            operation: OperationKind::RemoveSearchAttribute,
+            result: service
+                .remove_search_attribute(&namespace, &name)
+                .await
+                .map_err(|error| error.to_string()),
+        },
+        Command::SetDeploymentCurrent {
+            request_id,
+            namespace,
+            deployment_name,
+            build_id,
+        } => Message::OperationFinished {
+            request_id,
+            operation: OperationKind::SetDeploymentCurrent,
+            result: service
+                .set_worker_deployment_current_version(&namespace, &deployment_name, &build_id)
+                .await
+                .map_err(|error| error.to_string()),
+        },
+        Command::SetDeploymentRamp {
+            request_id,
+            namespace,
+            deployment_name,
+            build_id,
+            percentage,
+        } => Message::OperationFinished {
+            request_id,
+            operation: OperationKind::SetDeploymentRamp,
+            result: service
+                .set_worker_deployment_ramping_version(
+                    &namespace,
+                    &deployment_name,
+                    &build_id,
+                    percentage,
+                )
+                .await
+                .map_err(|error| error.to_string()),
+        },
+        Command::LoadBatchOperations {
+            request_id,
+            namespace,
+            page_size,
+            next_page_token,
+        } => Message::BatchOperationsLoaded {
+            request_id,
+            result: service
+                .list_batch_operations(&namespace, page_size, next_page_token)
+                .await
+                .map_err(|error| error.to_string()),
+        },
+        Command::LoadBatchOperationDetails {
+            request_id,
+            namespace,
+            job_id,
+        } => Message::BatchOperationDetailsLoaded {
+            request_id,
+            result: service
+                .describe_batch_operation(&namespace, &job_id)
+                .await
+                .map(Box::new)
+                .map_err(|error| error.to_string()),
+        },
+        Command::PreviewBatchOperation {
+            request_id,
+            namespace,
+            form,
+            request,
+        } => Message::BatchOperationPreviewLoaded {
+            request_id,
+            form,
+            result: service
+                .count_workflows(&namespace, &request.visibility_query)
+                .await
+                .map(|count| count.total)
+                .map_err(|error| error.to_string()),
+        },
+        Command::StartBatchOperation {
+            request_id,
+            namespace,
+            request,
+        } => Message::OperationFinished {
+            request_id,
+            operation: OperationKind::StartBatchOperation,
+            result: service
+                .start_batch_operation(&namespace, request)
+                .await
+                .map_err(|error| error.to_string()),
+        },
+        Command::StopBatchOperation {
+            request_id,
+            namespace,
+            job_id,
+            reason,
+        } => Message::OperationFinished {
+            request_id,
+            operation: OperationKind::StopBatchOperation,
+            result: service
+                .stop_batch_operation(&namespace, &job_id, &reason)
+                .await
                 .map_err(|error| error.to_string()),
         },
         Command::QueryWorkflow {

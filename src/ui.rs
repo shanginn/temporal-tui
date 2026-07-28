@@ -13,9 +13,11 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::{
     app::{
-        App, ConfirmAction, Focus, HandlerField, NoticeKind, Overlay, ResetField, ResetForm,
-        ScheduleBackfillField, ScheduleBackfillForm, ScheduleConfirmAction, ScheduleCreateField,
-        ScheduleCreateForm, ScheduleEditField, ScheduleEditForm, SignalField, SignalForm,
+        App, BatchCreateField, BatchCreateForm, ConfirmAction, DeploymentCurrentField,
+        DeploymentCurrentForm, DeploymentRampField, DeploymentRampForm, Focus, HandlerField,
+        NoticeKind, Overlay, ResetField, ResetForm, ScheduleBackfillField, ScheduleBackfillForm,
+        ScheduleConfirmAction, ScheduleCreateField, ScheduleCreateForm, ScheduleEditField,
+        ScheduleEditForm, SearchAttributeAddField, SearchAttributeAddForm, SignalField, SignalForm,
         TextInput, View, WorkflowCallForm, WorkflowCallKind,
     },
     model::{FailureSummary, StructuredField, WorkflowCallResult, WorkflowStatus},
@@ -60,6 +62,33 @@ pub fn render(frame: &mut Frame<'_>, app: &App) {
             Overlay::NamespacePicker { selected } => {
                 render_namespaces(frame, area, app, *selected, theme);
             }
+            Overlay::ProfilePicker { selected } => {
+                render_profiles(frame, area, app, *selected, theme);
+            }
+            Overlay::SearchAttributes { selected } => {
+                render_search_attributes(frame, area, app, *selected, theme);
+            }
+            Overlay::SearchAttributeAdd(form) => {
+                render_search_attribute_add(frame, area, form, theme);
+            }
+            Overlay::SearchAttributeRemove { name, input } => {
+                render_search_attribute_remove(frame, area, name, input, theme);
+            }
+            Overlay::DeploymentCurrent(form) => {
+                render_deployment_current(frame, area, form, theme);
+            }
+            Overlay::DeploymentRamp(form) => {
+                render_deployment_ramp(frame, area, form, theme);
+            }
+            Overlay::BatchCreate(form) => render_batch_create(frame, area, form, theme),
+            Overlay::BatchConfirm {
+                form,
+                matched_workflows,
+                input,
+            } => render_batch_confirmation(frame, area, form, *matched_workflows, input, theme),
+            Overlay::BatchStop { job_id, input } => {
+                render_batch_stop(frame, area, job_id, input, theme);
+            }
             Overlay::Confirm {
                 action,
                 workflow_id,
@@ -95,17 +124,24 @@ pub fn render(frame: &mut Frame<'_>, app: &App) {
 }
 
 fn render_header(frame: &mut Frame<'_>, app: &App, area: Rect, theme: Theme) {
-    let cluster = app.cluster.as_ref().map_or_else(
-        || "connecting…".to_string(),
-        |cluster| {
-            let name = if cluster.cluster_name.is_empty() {
-                "Temporal"
-            } else {
-                cluster.cluster_name.as_str()
-            };
-            format!("{name} {}", cluster.server_version)
-        },
-    );
+    let cluster = if app.switching_profile {
+        format!(
+            "switching to profile/{}…",
+            app.pending_profile_name.as_deref().unwrap_or("unknown")
+        )
+    } else {
+        app.cluster.as_ref().map_or_else(
+            || "connecting…".to_string(),
+            |cluster| {
+                let name = if cluster.cluster_name.is_empty() {
+                    "Temporal"
+                } else {
+                    cluster.cluster_name.as_str()
+                };
+                format!("{name} {}", cluster.server_version)
+            },
+        )
+    };
     let refresh = if app.auto_refresh {
         format!("auto {}s", app.refresh_interval.as_secs())
     } else {
@@ -116,7 +152,9 @@ fn render_header(frame: &mut Frame<'_>, app: &App, area: Rect, theme: Theme) {
     } else {
         &app.query
     };
-    let query = if active_query.is_empty() {
+    let query = if app.view == View::Batches {
+        "server-side batch jobs".to_string()
+    } else if active_query.is_empty() {
         if app.view == View::Schedules {
             "all schedules".to_string()
         } else {
@@ -131,13 +169,22 @@ fn render_header(frame: &mut Frame<'_>, app: &App, area: Rect, theme: Theme) {
         View::Workers,
         View::Deployments,
         View::Schedules,
+        View::Batches,
     ]
     .into_iter()
     .flat_map(|view| {
         let active = app.view == view;
         [
             Span::styled(
-                format!(" {} {} ", view.number(), view.label()),
+                format!(
+                    " {} {} ",
+                    view.number(),
+                    if area.width < 104 {
+                        view.short_label()
+                    } else {
+                        view.label()
+                    }
+                ),
                 if active {
                     theme.selection()
                 } else {
@@ -149,7 +196,14 @@ fn render_header(frame: &mut Frame<'_>, app: &App, area: Rect, theme: Theme) {
     })
     .collect::<Vec<_>>();
     let status = Line::from(vec![
-        Span::styled(" ● ", theme.success()),
+        Span::styled(
+            " ● ",
+            if app.switching_profile {
+                theme.warning()
+            } else {
+                theme.success()
+            },
+        ),
         Span::styled(cluster, theme.strong()),
         Span::raw("  "),
         Span::styled(format!("ns/{}", app.namespace), theme.accent()),
@@ -212,6 +266,7 @@ fn render_dashboard(frame: &mut Frame<'_>, app: &App, area: Rect, theme: Theme) 
         View::Workers => render_worker_dashboard(frame, app, area, theme),
         View::Deployments => render_deployment_dashboard(frame, app, area, theme),
         View::Schedules => render_schedule_dashboard(frame, app, area, theme),
+        View::Batches => render_batch_dashboard(frame, app, area, theme),
     }
 }
 
@@ -869,6 +924,115 @@ fn render_schedule_dashboard(frame: &mut Frame<'_>, app: &App, area: Rect, theme
     );
 }
 
+fn render_batch_dashboard(frame: &mut Frame<'_>, app: &App, area: Rect, theme: Theme) {
+    let [list_area, detail_area] = master_detail_areas(area);
+    let title = format!(
+        " Batch operations ({}) · page {}{} ",
+        app.batch_operations.len(),
+        app.batch_page_number,
+        if app.loading_batch_operations {
+            " ⟳"
+        } else {
+            ""
+        }
+    );
+    let rows = app.batch_operations.iter().map(|operation| {
+        let state_style = match operation.state.as_str() {
+            "RUNNING" => theme.warning(),
+            "COMPLETED" => theme.success(),
+            "FAILED" => theme.error(),
+            _ => theme.muted(),
+        };
+        Row::new([
+            Cell::from(operation.state.clone()).style(state_style),
+            Cell::from(operation.job_id.clone()),
+            Cell::from(format_time(operation.start_time.as_ref())),
+            Cell::from(format_time(operation.close_time.as_ref())),
+        ])
+    });
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Length(12),
+            Constraint::Fill(2),
+            Constraint::Length(17),
+            Constraint::Length(17),
+        ],
+    )
+    .header(Row::new(["STATE", "JOB ID", "STARTED", "CLOSED"]).style(theme.table_header()))
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(theme.accent())
+            .title(Span::styled(title, theme.title())),
+    )
+    .row_highlight_style(theme.selection())
+    .highlight_symbol("› ");
+    let mut state = TableState::default()
+        .with_selected((!app.batch_operations.is_empty()).then_some(app.selected_batch_operation));
+    frame.render_stateful_widget(table, list_area, &mut state);
+
+    let Some(details) = &app.batch_operation_details else {
+        render_empty_panel(
+            frame,
+            detail_area,
+            " Batch operation ",
+            app.batch_operations_error.as_deref().unwrap_or(
+                if app.loading_batch_operation_details {
+                    "Loading batch operation…"
+                } else {
+                    "No batch operations reported"
+                },
+            ),
+            theme,
+        );
+        return;
+    };
+    let progress = if details.total_operation_count > 0 {
+        let complete = i128::from(details.complete_operation_count.max(0));
+        let total = i128::from(details.total_operation_count);
+        let percentage_tenths = complete.saturating_mul(1_000) / total;
+        format!("{}.{}%", percentage_tenths / 10, percentage_tenths % 10)
+    } else {
+        "—".to_string()
+    };
+    let lines = vec![
+        inspector_value("Job ID", &details.summary.job_id, theme),
+        inspector_value("State", &details.summary.state, theme),
+        inspector_value("Operation", &details.operation_type, theme),
+        inspector_value("Started", &format_time(details.summary.start_time.as_ref()), theme),
+        inspector_value("Closed", &format_time(details.summary.close_time.as_ref()), theme),
+        inspector_value("Progress", &progress, theme),
+        inspector_value(
+            "Counts",
+            &format!(
+                "{} complete · {} failed · {} total",
+                details.complete_operation_count,
+                details.failure_operation_count,
+                details.total_operation_count
+            ),
+            theme,
+        ),
+        inspector_value("Identity", &details.identity, theme),
+        inspector_value("Reason", &details.reason, theme),
+        Line::default(),
+        Line::from("Server-side batchers evaluate the frozen Visibility query; the TUI never expands targets client-side.")
+            .style(theme.muted()),
+    ];
+    frame.render_widget(
+        Paragraph::new(Text::from(lines))
+            .wrap(Wrap { trim: false })
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(theme.border(false))
+                    .title(Span::styled(" Batch operation ", theme.title()))
+                    .padding(Padding::horizontal(1)),
+            ),
+        detail_area,
+    );
+}
+
 fn render_empty_panel(
     frame: &mut Frame<'_>,
     area: Rect,
@@ -1089,7 +1253,7 @@ fn render_footer(frame: &mut Frame<'_>, app: &App, area: Rect, theme: Theme) {
         ])
     } else {
         let mut spans = vec![
-            key_hint("1-5", "views", theme),
+            key_hint("1-6", "views", theme),
             Span::raw("  "),
             key_hint("j/k", "move", theme),
             Span::raw("  "),
@@ -1108,9 +1272,15 @@ fn render_footer(frame: &mut Frame<'_>, app: &App, area: Rect, theme: Theme) {
                 Span::raw("  "),
             ]),
             View::TaskQueues => spans.extend([key_hint("/", "queue name", theme), Span::raw("  ")]),
-            View::Workers | View::Deployments => {
+            View::Workers => {
                 spans.extend([key_hint("[/]", "pages", theme), Span::raw("  ")]);
             }
+            View::Deployments => spans.extend([
+                key_hint("C/R", "current/ramp", theme),
+                Span::raw("  "),
+                key_hint("[/]", "pages", theme),
+                Span::raw("  "),
+            ]),
             View::Schedules => spans.extend([
                 key_hint("/", "query", theme),
                 Span::raw("  "),
@@ -1121,11 +1291,21 @@ fn render_footer(frame: &mut Frame<'_>, app: &App, area: Rect, theme: Theme) {
                 key_hint("[/]", "pages", theme),
                 Span::raw("  "),
             ]),
+            View::Batches => spans.extend([
+                key_hint("N", "new", theme),
+                Span::raw("  "),
+                key_hint("s", "stop", theme),
+                Span::raw("  "),
+                key_hint("[/]", "pages", theme),
+                Span::raw("  "),
+            ]),
         }
         spans.extend([
             key_hint("r", "refresh", theme),
             Span::raw("  "),
             key_hint("n", "namespace", theme),
+            Span::raw("  "),
+            key_hint("P", "profile", theme),
             Span::raw("  "),
             key_hint("?", "help", theme),
             Span::raw("  "),
@@ -1150,6 +1330,7 @@ fn render_help(frame: &mut Frame<'_>, area: Rect, theme: Theme) {
         help_line("3", "heartbeat-enabled Worker runtime diagnostics", theme),
         help_line("4", "GA Worker Deployment routing and drainage", theme),
         help_line("5", "Schedule visibility, definition, and control", theme),
+        help_line("6", "server-side Batch Operation jobs and progress", theme),
         help_line(
             "/",
             "query Workflows or inspect a Task Queue by name",
@@ -1168,6 +1349,12 @@ fn render_help(frame: &mut Frame<'_>, area: Rect, theme: Theme) {
         help_line("f", "select a saved visibility query", theme),
         help_line("#", "show GROUP BY visibility counts", theme),
         help_line("n", "switch namespace", theme),
+        help_line(
+            "A",
+            "inspect and manage the Search Attribute registry",
+            theme,
+        ),
+        help_line("P", "switch configured Temporal connection profile", theme),
         help_line("r", "refresh now", theme),
         help_line("a", "toggle automatic refresh", theme),
         help_line("H", "load the next older history page", theme),
@@ -1194,6 +1381,26 @@ fn render_help(frame: &mut Frame<'_>, area: Rect, theme: Theme) {
         help_line("p", "pause or unpause a Schedule", theme),
         help_line("t / b", "trigger now / backfill a time range", theme),
         help_line("d", "delete with exact Schedule ID confirmation", theme),
+        Line::default(),
+        help_section("WORKER DEPLOYMENT CONTROL", theme),
+        help_line("C", "set or promote the Current build ID", theme),
+        help_line(
+            "R",
+            "set or clear the Ramping build ID and percentage",
+            theme,
+        ),
+        Line::default(),
+        help_section("BATCH CONTROL", theme),
+        help_line(
+            "N",
+            "preview and start a server-side batch operation",
+            theme,
+        ),
+        help_line(
+            "s",
+            "stop a running batch job with exact-ID confirmation",
+            theme,
+        ),
         Line::default(),
         help_line("q / ctrl-c", "quit", theme),
         help_line("? / esc", "close this help", theme),
@@ -1357,6 +1564,85 @@ fn render_aggregations(
     frame.render_stateful_widget(table, popup, &mut state);
 }
 
+fn render_profiles(frame: &mut Frame<'_>, area: Rect, app: &App, selected: usize, theme: Theme) {
+    let visible = app.profiles.len().clamp(3, 20);
+    let popup = centered(
+        area,
+        104,
+        u16::try_from(visible).unwrap_or(20).saturating_add(5),
+    );
+    frame.render_widget(Clear, popup);
+    let rows = app.profiles.iter().map(|profile| {
+        let active = app.profile_name.as_deref() == Some(profile.name.as_str());
+        let marker = if active {
+            "ACTIVE"
+        } else if profile.is_default {
+            "DEFAULT"
+        } else {
+            ""
+        };
+        Row::new([
+            marker,
+            profile.name.as_str(),
+            profile.address.as_str(),
+            profile.namespace.as_str(),
+            if profile.read_only {
+                "READ ONLY"
+            } else {
+                "CONTROL"
+            },
+            if profile.codec_enabled {
+                "CODEC"
+            } else {
+                "PLAIN"
+            },
+        ])
+        .style(if active {
+            theme.strong()
+        } else {
+            theme.muted()
+        })
+    });
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Length(8),
+            Constraint::Fill(2),
+            Constraint::Fill(3),
+            Constraint::Fill(2),
+            Constraint::Length(10),
+            Constraint::Length(7),
+        ],
+    )
+    .header(
+        Row::new([
+            "STATE",
+            "PROFILE",
+            "ADDRESS",
+            "NAMESPACE",
+            "MODE",
+            "PAYLOAD",
+        ])
+        .style(theme.table_header()),
+    )
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(theme.accent())
+            .title(Span::styled(" Switch Temporal profile ", theme.title()))
+            .title_bottom(
+                Line::from(" enter connect · secrets resolve only after selection · esc cancel ")
+                    .alignment(Alignment::Right)
+                    .style(theme.muted()),
+            ),
+    )
+    .row_highlight_style(theme.selection())
+    .highlight_symbol("› ");
+    let mut state =
+        TableState::default().with_selected((!app.profiles.is_empty()).then_some(selected));
+    frame.render_stateful_widget(table, popup, &mut state);
+}
+
 fn render_namespaces(frame: &mut Frame<'_>, area: Rect, app: &App, selected: usize, theme: Theme) {
     let visible_namespaces = app.namespaces.len().clamp(3, 20);
     let height = u16::try_from(visible_namespaces).unwrap_or(20) + 4;
@@ -1391,6 +1677,604 @@ fn render_namespaces(frame: &mut Frame<'_>, area: Rect, app: &App, selected: usi
         .highlight_symbol("› ");
     let mut state = ListState::default().with_selected(Some(selected));
     frame.render_stateful_widget(list, popup, &mut state);
+}
+
+fn render_search_attributes(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &App,
+    selected: usize,
+    theme: Theme,
+) {
+    let visible = app.search_attributes.len().clamp(8, 24);
+    let popup = centered(
+        area,
+        104,
+        u16::try_from(visible).unwrap_or(24).saturating_add(5),
+    );
+    frame.render_widget(Clear, popup);
+    let rows = app.search_attributes.iter().map(|attribute| {
+        Row::new([
+            if attribute.custom { "CUSTOM" } else { "SYSTEM" },
+            attribute.name.as_str(),
+            attribute.value_type.as_str(),
+            attribute.storage_type.as_str(),
+        ])
+        .style(if attribute.custom {
+            theme.strong()
+        } else {
+            theme.muted()
+        })
+    });
+    let status = if app.loading_search_attributes {
+        "loading…".to_string()
+    } else if let Some(error) = &app.search_attributes_error {
+        format!("unavailable: {error}")
+    } else {
+        format!("{} entries", app.search_attributes.len())
+    };
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Length(9),
+            Constraint::Fill(3),
+            Constraint::Length(18),
+            Constraint::Fill(2),
+        ],
+    )
+    .header(Row::new(["SCOPE", "NAME", "VALUE TYPE", "STORAGE"]).style(theme.table_header()))
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(theme.accent())
+            .title(Span::styled(
+                format!(" Search Attributes · {} · {status} ", app.namespace),
+                theme.title(),
+            ))
+            .title_bottom(
+                Line::from(" a add · d remove custom · r refresh · esc close ")
+                    .alignment(Alignment::Right)
+                    .style(theme.muted()),
+            ),
+    )
+    .row_highlight_style(theme.selection())
+    .highlight_symbol("› ");
+    let mut state = TableState::default()
+        .with_selected((!app.search_attributes.is_empty()).then_some(selected));
+    frame.render_stateful_widget(table, popup, &mut state);
+}
+
+fn render_search_attribute_add(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    form: &SearchAttributeAddForm,
+    theme: Theme,
+) {
+    let popup = centered(area, 88, 16);
+    frame.render_widget(Clear, popup);
+    frame.render_widget(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(theme.warning())
+            .title(Span::styled(" Register Search Attribute ", theme.title()))
+            .title_bottom(
+                Line::from(" enter next/send · tab field · esc cancel ")
+                    .alignment(Alignment::Right)
+                    .style(theme.muted()),
+            ),
+        popup,
+    );
+    let inner = popup.inner(ratatui::layout::Margin {
+        vertical: 1,
+        horizontal: 2,
+    });
+    let areas = Layout::vertical([
+        Constraint::Length(3),
+        Constraint::Length(3),
+        Constraint::Length(3),
+        Constraint::Min(1),
+    ])
+    .spacing(1)
+    .split(inner);
+    let name_offset = render_form_input(
+        frame,
+        areas[0],
+        " Name ",
+        &form.name,
+        form.active_field == SearchAttributeAddField::Name,
+        theme,
+    );
+    let type_offset = render_form_input(
+        frame,
+        areas[1],
+        " Type: Text | Keyword | Int | Double | Bool | Datetime | KeywordList ",
+        &form.value_type,
+        form.active_field == SearchAttributeAddField::ValueType,
+        theme,
+    );
+    let confirmation_offset = render_form_input(
+        frame,
+        areas[2],
+        " Type the exact name to confirm ",
+        &form.confirmation,
+        form.active_field == SearchAttributeAddField::Confirmation,
+        theme,
+    );
+    frame.render_widget(
+        Paragraph::new("Registration mutates the namespace Search Attribute schema.")
+            .style(theme.warning()),
+        areas[3],
+    );
+    match form.active_field {
+        SearchAttributeAddField::Name => {
+            set_input_cursor(frame, areas[0], &form.name, name_offset);
+        }
+        SearchAttributeAddField::ValueType => {
+            set_input_cursor(frame, areas[1], &form.value_type, type_offset);
+        }
+        SearchAttributeAddField::Confirmation => {
+            set_input_cursor(frame, areas[2], &form.confirmation, confirmation_offset);
+        }
+    }
+}
+
+fn render_search_attribute_remove(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    name: &str,
+    input: &TextInput,
+    theme: Theme,
+) {
+    let popup = centered(area, 84, 11);
+    frame.render_widget(Clear, popup);
+    frame.render_widget(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(theme.error())
+            .title(Span::styled(" Remove Search Attribute ", theme.error()))
+            .title_bottom(
+                Line::from(" enter remove · esc cancel ")
+                    .alignment(Alignment::Right)
+                    .style(theme.muted()),
+            ),
+        popup,
+    );
+    let inner = popup.inner(ratatui::layout::Margin {
+        vertical: 1,
+        horizontal: 2,
+    });
+    let areas = Layout::vertical([
+        Constraint::Length(2),
+        Constraint::Length(3),
+        Constraint::Min(1),
+    ])
+    .spacing(1)
+    .split(inner);
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::raw("Remove custom attribute "),
+            Span::styled(name, theme.strong()),
+            Span::raw("?"),
+        ])),
+        areas[0],
+    );
+    let offset = render_form_input(
+        frame,
+        areas[1],
+        " Exact attribute name ",
+        input,
+        true,
+        theme,
+    );
+    frame.render_widget(
+        Paragraph::new("Existing indexed values may become unavailable to Visibility queries.")
+            .style(theme.warning()),
+        areas[2],
+    );
+    set_input_cursor(frame, areas[1], input, offset);
+}
+
+fn render_deployment_current(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    form: &DeploymentCurrentForm,
+    theme: Theme,
+) {
+    let popup = centered(area, 90, 15);
+    frame.render_widget(Clear, popup);
+    frame.render_widget(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(theme.warning())
+            .title(Span::styled(
+                format!(" Set Current · {} ", form.deployment_name),
+                theme.title(),
+            ))
+            .title_bottom(
+                Line::from(" enter next/send · tab field · esc cancel ")
+                    .alignment(Alignment::Right)
+                    .style(theme.muted()),
+            ),
+        popup,
+    );
+    let inner = popup.inner(ratatui::layout::Margin {
+        vertical: 1,
+        horizontal: 2,
+    });
+    let areas = Layout::vertical([
+        Constraint::Length(2),
+        Constraint::Length(3),
+        Constraint::Length(3),
+        Constraint::Min(1),
+    ])
+    .spacing(1)
+    .split(inner);
+    frame.render_widget(
+        Paragraph::new("Blank build ID routes Current traffic to unversioned Workers.")
+            .style(theme.muted()),
+        areas[0],
+    );
+    let build_offset = render_form_input(
+        frame,
+        areas[1],
+        " Current build ID ",
+        &form.build_id,
+        form.active_field == DeploymentCurrentField::BuildId,
+        theme,
+    );
+    let confirmation_offset = render_form_input(
+        frame,
+        areas[2],
+        " Type the exact Deployment name ",
+        &form.confirmation,
+        form.active_field == DeploymentCurrentField::Confirmation,
+        theme,
+    );
+    frame.render_widget(
+        Paragraph::new(
+            "Uses a fresh conflict token; missing Task Queue and no-poller safety checks remain \
+             enabled.",
+        )
+        .style(theme.warning())
+        .wrap(Wrap { trim: true }),
+        areas[3],
+    );
+    match form.active_field {
+        DeploymentCurrentField::BuildId => {
+            set_input_cursor(frame, areas[1], &form.build_id, build_offset);
+        }
+        DeploymentCurrentField::Confirmation => {
+            set_input_cursor(frame, areas[2], &form.confirmation, confirmation_offset);
+        }
+    }
+}
+
+fn render_deployment_ramp(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    form: &DeploymentRampForm,
+    theme: Theme,
+) {
+    let popup = centered(area, 90, 18);
+    frame.render_widget(Clear, popup);
+    frame.render_widget(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(theme.warning())
+            .title(Span::styled(
+                format!(" Configure Ramp · {} ", form.deployment_name),
+                theme.title(),
+            ))
+            .title_bottom(
+                Line::from(" enter next/send · tab field · esc cancel ")
+                    .alignment(Alignment::Right)
+                    .style(theme.muted()),
+            ),
+        popup,
+    );
+    let inner = popup.inner(ratatui::layout::Margin {
+        vertical: 1,
+        horizontal: 2,
+    });
+    let areas = Layout::vertical([
+        Constraint::Length(2),
+        Constraint::Length(3),
+        Constraint::Length(3),
+        Constraint::Length(3),
+        Constraint::Min(1),
+    ])
+    .spacing(1)
+    .split(inner);
+    frame.render_widget(
+        Paragraph::new("Use blank build ID with 0% to clear the Ramping Version.")
+            .style(theme.muted()),
+        areas[0],
+    );
+    let build_offset = render_form_input(
+        frame,
+        areas[1],
+        " Ramping build ID ",
+        &form.build_id,
+        form.active_field == DeploymentRampField::BuildId,
+        theme,
+    );
+    let percentage_offset = render_form_input(
+        frame,
+        areas[2],
+        " Percentage 0-100 ",
+        &form.percentage,
+        form.active_field == DeploymentRampField::Percentage,
+        theme,
+    );
+    let confirmation_offset = render_form_input(
+        frame,
+        areas[3],
+        " Type the exact Deployment name ",
+        &form.confirmation,
+        form.active_field == DeploymentRampField::Confirmation,
+        theme,
+    );
+    frame.render_widget(
+        Paragraph::new("The server's missing-queue and no-poller protections are never bypassed.")
+            .style(theme.warning()),
+        areas[4],
+    );
+    match form.active_field {
+        DeploymentRampField::BuildId => {
+            set_input_cursor(frame, areas[1], &form.build_id, build_offset);
+        }
+        DeploymentRampField::Percentage => {
+            set_input_cursor(frame, areas[2], &form.percentage, percentage_offset);
+        }
+        DeploymentRampField::Confirmation => {
+            set_input_cursor(frame, areas[3], &form.confirmation, confirmation_offset);
+        }
+    }
+}
+
+fn render_batch_create(frame: &mut Frame<'_>, area: Rect, form: &BatchCreateForm, theme: Theme) {
+    let popup = centered(area, 108, 22);
+    frame.render_widget(Clear, popup);
+    frame.render_widget(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(theme.warning())
+            .title(Span::styled(" Preview Batch Operation ", theme.title()))
+            .title_bottom(
+                Line::from(" enter next/preview · tab field · esc cancel ")
+                    .alignment(Alignment::Right)
+                    .style(theme.muted()),
+            ),
+        popup,
+    );
+    let inner = popup.inner(ratatui::layout::Margin {
+        vertical: 1,
+        horizontal: 2,
+    });
+    let columns = Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .spacing(1)
+        .split(inner);
+    let left = Layout::vertical([Constraint::Length(3); 4])
+        .spacing(1)
+        .split(columns[0]);
+    let right = Layout::vertical([
+        Constraint::Length(3),
+        Constraint::Length(3),
+        Constraint::Length(3),
+        Constraint::Length(3),
+    ])
+    .spacing(1)
+    .split(columns[1]);
+    let fields = [
+        (
+            BatchCreateField::JobId,
+            left[0],
+            " Unique Job ID ",
+            &form.job_id,
+        ),
+        (
+            BatchCreateField::Operation,
+            right[0],
+            " cancel | terminate | signal | delete ",
+            &form.operation,
+        ),
+        (
+            BatchCreateField::VisibilityQuery,
+            left[1],
+            " Non-empty Visibility query ",
+            &form.visibility_query,
+        ),
+        (
+            BatchCreateField::Reason,
+            right[1],
+            " Audit reason ",
+            &form.reason,
+        ),
+        (
+            BatchCreateField::MaxOperationsPerSecond,
+            left[2],
+            " Max operations/sec (0 = server default) ",
+            &form.max_operations_per_second,
+        ),
+        (
+            BatchCreateField::SignalName,
+            right[2],
+            " Signal name (signal only) ",
+            &form.signal_name,
+        ),
+        (
+            BatchCreateField::SignalInput,
+            left[3],
+            " Signal JSON input ",
+            &form.signal_input,
+        ),
+    ];
+    for (field, field_area, label, input) in fields {
+        let offset = render_form_input(
+            frame,
+            field_area,
+            label,
+            input,
+            form.active_field == field,
+            theme,
+        );
+        if form.active_field == field {
+            set_input_cursor(frame, field_area, input, offset);
+        }
+    }
+    frame.render_widget(
+        Paragraph::new(
+            "Preview counts matching Workflows through Temporal before any job can start. Targets \
+             stay server-side and are never enumerated by the TUI.",
+        )
+        .style(theme.warning())
+        .wrap(Wrap { trim: true }),
+        right[3],
+    );
+}
+
+fn render_batch_confirmation(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    form: &BatchCreateForm,
+    matched_workflows: i64,
+    input: &TextInput,
+    theme: Theme,
+) {
+    let popup = centered(area, 104, 17);
+    frame.render_widget(Clear, popup);
+    let operation = form.operation.value.trim().to_ascii_uppercase();
+    let dangerous = matches!(operation.as_str(), "TERMINATE" | "DELETE");
+    frame.render_widget(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(if dangerous {
+                theme.error()
+            } else {
+                theme.warning()
+            })
+            .title(Span::styled(
+                " Confirm server-side Batch Operation ",
+                if dangerous {
+                    theme.error()
+                } else {
+                    theme.title()
+                },
+            ))
+            .title_bottom(
+                Line::from(" enter start · esc cancel ")
+                    .alignment(Alignment::Right)
+                    .style(theme.muted()),
+            ),
+        popup,
+    );
+    let inner = popup.inner(ratatui::layout::Margin {
+        vertical: 1,
+        horizontal: 2,
+    });
+    let areas = Layout::vertical([
+        Constraint::Length(2),
+        Constraint::Length(2),
+        Constraint::Length(3),
+        Constraint::Length(3),
+        Constraint::Min(1),
+    ])
+    .spacing(1)
+    .split(inner);
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(operation, theme.strong()),
+            Span::raw(" will target "),
+            Span::styled(matched_workflows.to_string(), theme.warning()),
+            Span::raw(" matching Workflow Executions."),
+        ])),
+        areas[0],
+    );
+    frame.render_widget(
+        Paragraph::new(form.visibility_query.value.as_str())
+            .style(theme.muted())
+            .wrap(Wrap { trim: false }),
+        areas[1],
+    );
+    frame.render_widget(
+        Paragraph::new(format!(
+            "Job ID: {} · max {}/sec",
+            form.job_id.value.trim(),
+            form.max_operations_per_second.value.trim()
+        )),
+        areas[2],
+    );
+    let offset = render_form_input(
+        frame,
+        areas[3],
+        " Type the exact Job ID ",
+        input,
+        true,
+        theme,
+    );
+    frame.render_widget(
+        Paragraph::new(
+            "This starts one Temporal server-side batch job; it does not issue per-Workflow \
+             client calls.",
+        )
+        .style(if dangerous {
+            theme.error()
+        } else {
+            theme.warning()
+        })
+        .wrap(Wrap { trim: true }),
+        areas[4],
+    );
+    set_input_cursor(frame, areas[3], input, offset);
+}
+
+fn render_batch_stop(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    job_id: &str,
+    input: &TextInput,
+    theme: Theme,
+) {
+    let popup = centered(area, 84, 11);
+    frame.render_widget(Clear, popup);
+    frame.render_widget(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(theme.warning())
+            .title(Span::styled(" Stop Batch Operation ", theme.title()))
+            .title_bottom(
+                Line::from(" enter stop · esc cancel ")
+                    .alignment(Alignment::Right)
+                    .style(theme.muted()),
+            ),
+        popup,
+    );
+    let inner = popup.inner(ratatui::layout::Margin {
+        vertical: 1,
+        horizontal: 2,
+    });
+    let areas = Layout::vertical([
+        Constraint::Length(2),
+        Constraint::Length(3),
+        Constraint::Min(1),
+    ])
+    .spacing(1)
+    .split(inner);
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::raw("Stop running job "),
+            Span::styled(job_id, theme.strong()),
+            Span::raw("?"),
+        ])),
+        areas[0],
+    );
+    let offset = render_form_input(frame, areas[1], " Exact Job ID ", input, true, theme);
+    frame.render_widget(
+        Paragraph::new("Already completed per-Workflow operations are not rolled back.")
+            .style(theme.warning()),
+        areas[2],
+    );
+    set_input_cursor(frame, areas[1], input, offset);
 }
 
 fn render_workflow_chain(
@@ -2425,10 +3309,11 @@ mod tests {
 
     use super::*;
     use crate::{
-        app::{AppConfig, Overlay},
+        app::{AppConfig, Overlay, ProfileSummary},
         model::{
-            ClusterInfo, DeploymentVersion, DeploymentVersionSummary, HistoryEventSummary,
-            PollerSummary, ScheduleActionResult, ScheduleDetails, ScheduleSummary, StructuredField,
+            BatchOperationDetails, BatchOperationSummary, ClusterInfo, DeploymentVersion,
+            DeploymentVersionSummary, HistoryEventSummary, PollerSummary, ScheduleActionResult,
+            ScheduleDetails, ScheduleSummary, SearchAttributeSummary, StructuredField,
             TaskQueueStats, TaskQueueSummary, TaskQueueType, WorkerDeploymentDetails,
             WorkerDeploymentSummary, WorkerDetails, WorkerSlots, WorkerSummary, WorkflowCallResult,
             WorkflowCount, WorkflowCountGroup, WorkflowDetails, WorkflowKey, WorkflowSummary,
@@ -2446,9 +3331,11 @@ mod tests {
             auto_refresh: true,
             color: true,
             read_only: false,
+            force_read_only: false,
             codec_enabled: false,
             web_ui_url: Some("http://localhost:8233".to_string()),
             saved_queries: Vec::new(),
+            profiles: Vec::new(),
         });
         app.cluster = Some(ClusterInfo {
             cluster_name: "dev".to_string(),
@@ -2684,6 +3571,27 @@ mod tests {
         assert!(deployments.contains("release-controller"));
         assert!(deployments.contains("DRAINED"));
         assert!(deployments.contains("COMPLETED"));
+
+        deployment_app.overlay = Some(Overlay::DeploymentCurrent(DeploymentCurrentForm {
+            deployment_name: "payments".to_string(),
+            build_id: TextInput::new("2026.07.28"),
+            confirmation: TextInput::default(),
+            active_field: DeploymentCurrentField::BuildId,
+        }));
+        let current = rendered(&deployment_app, 140, 38);
+        assert!(current.contains("Set Current"));
+        assert!(current.contains("missing Task Queue"));
+
+        deployment_app.overlay = Some(Overlay::DeploymentRamp(DeploymentRampForm {
+            deployment_name: "payments".to_string(),
+            build_id: TextInput::new("2026.07.29"),
+            percentage: TextInput::new("10"),
+            confirmation: TextInput::default(),
+            active_field: DeploymentRampField::BuildId,
+        }));
+        let ramp = rendered(&deployment_app, 140, 38);
+        assert!(ramp.contains("Configure Ramp"));
+        assert!(ramp.contains("never bypassed"));
     }
 
     #[test]
@@ -2770,6 +3678,143 @@ mod tests {
         assert!(create.contains("Create Schedule"));
         assert!(create.contains("Cron / @every"));
         assert!(create.contains("JSON arguments []"));
+    }
+
+    #[test]
+    fn renders_search_attribute_registry_and_exact_mutation_forms() {
+        let mut app = sample_app();
+        app.search_attributes = vec![
+            SearchAttributeSummary {
+                name: "CustomerTier".to_string(),
+                value_type: "KEYWORD".to_string(),
+                storage_type: "keyword".to_string(),
+                custom: true,
+            },
+            SearchAttributeSummary {
+                name: "WorkflowId".to_string(),
+                value_type: "KEYWORD".to_string(),
+                storage_type: "keyword".to_string(),
+                custom: false,
+            },
+        ];
+        app.overlay = Some(Overlay::SearchAttributes { selected: 0 });
+        let registry = rendered(&app, 120, 36);
+        assert!(registry.contains("Search Attributes"));
+        assert!(registry.contains("CustomerTier"));
+        assert!(registry.contains("CUSTOM"));
+
+        app.overlay = Some(Overlay::SearchAttributeAdd(
+            SearchAttributeAddForm::default(),
+        ));
+        let add = rendered(&app, 120, 36);
+        assert!(add.contains("Register Search Attribute"));
+        assert!(add.contains("KeywordList"));
+
+        app.overlay = Some(Overlay::SearchAttributeRemove {
+            name: "CustomerTier".to_string(),
+            input: TextInput::default(),
+        });
+        let remove = rendered(&app, 120, 36);
+        assert!(remove.contains("Remove Search Attribute"));
+        assert!(remove.contains("CustomerTier"));
+    }
+
+    #[test]
+    fn renders_batch_control_plane_and_exact_confirmation_forms() {
+        let summary = BatchOperationSummary {
+            job_id: "cancel-stale-orders".to_string(),
+            state: "RUNNING".to_string(),
+            start_time: Some(Utc.with_ymd_and_hms(2026, 7, 28, 12, 0, 0).unwrap()),
+            close_time: None,
+        };
+        let mut app = sample_app();
+        app.view = View::Batches;
+        app.batch_operations = vec![summary.clone()];
+        app.batch_operation_details = Some(BatchOperationDetails {
+            summary,
+            operation_type: "CANCEL".to_string(),
+            total_operation_count: 12,
+            complete_operation_count: 9,
+            failure_operation_count: 1,
+            identity: "temporal-tui".to_string(),
+            reason: "stale order cleanup".to_string(),
+        });
+        let dashboard = rendered(&app, 150, 42);
+        assert!(dashboard.contains("BATCHES"));
+        assert!(dashboard.contains("cancel-stale-orders"));
+        assert!(dashboard.contains("CANCEL"));
+        assert!(dashboard.contains("9 complete · 1 failed · 12 total"));
+        assert!(dashboard.contains("server-side"));
+
+        let form = BatchCreateForm {
+            job_id: TextInput::new("cancel-stale-orders"),
+            operation: TextInput::new("terminate"),
+            visibility_query: TextInput::new("WorkflowType = 'OrderWorkflow'"),
+            reason: TextInput::new("stale order cleanup"),
+            max_operations_per_second: TextInput::new("10"),
+            signal_name: TextInput::default(),
+            signal_input: TextInput::new("{}"),
+            active_field: BatchCreateField::JobId,
+        };
+        app.overlay = Some(Overlay::BatchCreate(form.clone()));
+        let create = rendered(&app, 150, 42);
+        assert!(create.contains("Preview Batch Operation"));
+        assert!(create.contains("Visibility query"));
+        assert!(create.contains("Targets"));
+
+        app.overlay = Some(Overlay::BatchConfirm {
+            form,
+            matched_workflows: 37,
+            input: TextInput::default(),
+        });
+        let confirmation = rendered(&app, 150, 42);
+        assert!(confirmation.contains("37 matching Workflow Executions"));
+        assert!(confirmation.contains("WorkflowType = 'OrderWorkflow'"));
+        assert!(confirmation.contains("Type the exact Job ID"));
+
+        app.overlay = Some(Overlay::BatchStop {
+            job_id: "cancel-stale-orders".to_string(),
+            input: TextInput::default(),
+        });
+        let stop = rendered(&app, 120, 32);
+        assert!(stop.contains("Stop Batch Operation"));
+        assert!(stop.contains("cancel-stale-orders"));
+        assert!(stop.contains("Exact Job ID"));
+    }
+
+    #[test]
+    fn renders_non_secret_profile_picker_and_switching_state() {
+        let mut app = sample_app();
+        app.profiles = vec![
+            ProfileSummary {
+                name: "dev".to_string(),
+                address: "127.0.0.1:7233".to_string(),
+                namespace: "default".to_string(),
+                read_only: false,
+                codec_enabled: false,
+                is_default: true,
+            },
+            ProfileSummary {
+                name: "production".to_string(),
+                address: "production.tmprl.cloud:7233".to_string(),
+                namespace: "payments.a1b2c".to_string(),
+                read_only: true,
+                codec_enabled: true,
+                is_default: false,
+            },
+        ];
+        app.overlay = Some(Overlay::ProfilePicker { selected: 1 });
+        let picker = rendered(&app, 150, 42);
+        assert!(picker.contains("Switch Temporal profile"));
+        assert!(picker.contains("production.tmprl.cloud:7233"));
+        assert!(picker.contains("READ ONLY"));
+        assert!(picker.contains("secrets resolve only after selection"));
+
+        app.overlay = None;
+        app.switching_profile = true;
+        app.pending_profile_name = Some("production".to_string());
+        let switching = rendered(&app, 120, 32);
+        assert!(switching.contains("switching to profile/production"));
     }
 
     #[test]

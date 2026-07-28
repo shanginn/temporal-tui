@@ -8,7 +8,7 @@ use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 
 use crate::{
-    app::{AppConfig, SavedQuery},
+    app::{AppConfig, ProfileSummary, SavedQuery},
     config::{
         ConfigStore, ConnectionProfile, ProfilePayloadCodec, ProfileTls, SavedFilter, SecretSource,
         UserConfig,
@@ -387,6 +387,18 @@ impl Cli {
             .collect::<Vec<_>>();
         saved_queries.sort_by(|left, right| left.name.cmp(&right.name));
         let codec_enabled = connection.payload_codec.is_some();
+        let profiles = config
+            .profiles
+            .iter()
+            .map(|(name, profile)| ProfileSummary {
+                name: name.clone(),
+                address: profile.address.clone(),
+                namespace: profile.namespace.clone(),
+                read_only: profile.read_only,
+                codec_enabled: profile.payload_codec.is_some(),
+                is_default: config.default_profile.as_deref() == Some(name),
+            })
+            .collect();
 
         Ok(LaunchConfig {
             app: AppConfig {
@@ -399,9 +411,11 @@ impl Cli {
                 auto_refresh: !self.no_auto_refresh,
                 color: !self.no_color,
                 read_only: self.read_only || profile_read_only,
+                force_read_only: self.read_only,
                 codec_enabled,
                 web_ui_url,
                 saved_queries,
+                profiles,
             },
             connection,
         })
@@ -741,6 +755,11 @@ mod tests {
         assert_eq!(launch.connection.address, "dev.example:7233");
         assert_eq!(launch.app.namespace, "orders");
         assert!(launch.app.read_only);
+        assert!(!launch.app.force_read_only);
+        assert_eq!(launch.app.profiles.len(), 1);
+        assert_eq!(launch.app.profiles[0].name, "dev");
+        assert_eq!(launch.app.profiles[0].namespace, "payments");
+        assert!(launch.app.profiles[0].is_default);
     }
 
     #[test]

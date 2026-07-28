@@ -28,7 +28,7 @@ async fn main() -> Result<()> {
     let app = App::new(launch.app);
     let mut terminal = TerminalSession::new()?;
 
-    runtime::run(&mut terminal, app, service).await
+    runtime::run(&mut terminal, app, service, store).await
 }
 
 fn init_tracing() {

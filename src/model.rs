@@ -108,6 +108,72 @@ pub struct WorkflowCallResult {
     pub failure: Option<FailureSummary>,
 }
 
+/// Namespace Search Attribute registry entry.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SearchAttributeSummary {
+    pub name: String,
+    pub value_type: String,
+    pub storage_type: String,
+    pub custom: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BatchOperationKind {
+    Cancel,
+    Terminate,
+    Signal,
+    Delete,
+}
+
+impl BatchOperationKind {
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Cancel => "CANCEL",
+            Self::Terminate => "TERMINATE",
+            Self::Signal => "SIGNAL",
+            Self::Delete => "DELETE",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct BatchOperationRequest {
+    pub job_id: String,
+    pub visibility_query: String,
+    pub reason: String,
+    pub max_operations_per_second: f32,
+    pub kind: BatchOperationKind,
+    pub signal_name: String,
+    pub signal_input: serde_json::Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct BatchOperationSummary {
+    pub job_id: String,
+    pub state: String,
+    pub start_time: Option<DateTime<Utc>>,
+    pub close_time: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct BatchOperationDetails {
+    pub summary: BatchOperationSummary,
+    pub operation_type: String,
+    pub total_operation_count: i64,
+    pub complete_operation_count: i64,
+    pub failure_operation_count: i64,
+    pub identity: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BatchOperationPage {
+    pub operations: Vec<BatchOperationSummary>,
+    pub next_page_token: Vec<u8>,
+}
+
 /// Safe failure tree extracted from Temporal failure payloads.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct FailureSummary {

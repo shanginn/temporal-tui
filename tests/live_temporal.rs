@@ -20,13 +20,16 @@ use std::{
 use base64::prelude::*;
 use temporal_tui::{
     model::{
-        ScheduleBackfillRequest, ScheduleCreateRequest, ScheduleUpdateRequest, WorkflowKey,
-        WorkflowStatus,
+        BatchOperationKind, BatchOperationRequest, ScheduleBackfillRequest, ScheduleCreateRequest,
+        ScheduleUpdateRequest, WorkflowKey, WorkflowStatus,
     },
     service::{GrpcTemporalService, PayloadCodecConfig, TemporalConnectionConfig, TemporalService},
 };
 use temporalio_client::{Client, ClientOptions, Connection, ConnectionOptions};
-use temporalio_common::worker::WorkerTaskTypes;
+use temporalio_common::{
+    protos::temporal::api::enums::v1::VersioningBehavior,
+    worker::{WorkerDeploymentOptions, WorkerDeploymentVersion, WorkerTaskTypes},
+};
 use temporalio_macros::{workflow, workflow_methods};
 use temporalio_sdk::{
     SyncWorkflowContext, Worker, WorkerOptions, WorkflowContext, WorkflowContextView,
@@ -164,8 +167,37 @@ async fn run_live_dashboard_and_control_operations() {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
+    let search_attribute_name = format!("TuiContract{suffix}");
+    service
+        .add_search_attribute("default", &search_attribute_name, "Keyword")
+        .await
+        .expect("register Search Attribute");
+    let attributes = service
+        .list_search_attributes("default")
+        .await
+        .expect("list Search Attributes");
+    assert!(attributes.iter().any(|attribute| {
+        attribute.name == search_attribute_name
+            && attribute.custom
+            && attribute.value_type == "KEYWORD"
+    }));
+    service
+        .remove_search_attribute("default", &search_attribute_name)
+        .await
+        .expect("remove Search Attribute");
+    assert!(
+        service
+            .list_search_attributes("default")
+            .await
+            .expect("list Search Attributes after removal")
+            .iter()
+            .all(|attribute| attribute.name != search_attribute_name)
+    );
     let control_workflow_id = format!("temporal-tui-control-{suffix}");
     let control_task_queue = format!("temporal-tui-control-{suffix}");
+    let control_deployment = format!("temporal-tui-deployment-{suffix}");
+    let control_build_v1 = format!("v1-{suffix}");
+    let control_build_v2 = format!("v2-{suffix}");
     let worker_runtime =
         CoreRuntime::new_assume_tokio(RuntimeOptions::builder().build().expect("runtime options"))
             .expect("Temporal Core runtime");
@@ -182,15 +214,105 @@ async fn run_live_dashboard_and_control_operations() {
         ClientOptions::new("default".to_string()).build(),
     )
     .expect("worker client");
-    let worker_options = WorkerOptions::new(control_task_queue.clone())
+    let worker_v1_options = WorkerOptions::new(control_task_queue.clone())
         .register_workflow::<TemporalTuiControlWorkflow>()
         .expect("register control Workflow")
         .task_types(WorkerTaskTypes::workflow_only())
+        .deployment_options(WorkerDeploymentOptions {
+            version: WorkerDeploymentVersion {
+                deployment_name: control_deployment.clone(),
+                build_id: control_build_v1.clone(),
+            },
+            use_worker_versioning: true,
+            default_versioning_behavior: Some(VersioningBehavior::AutoUpgrade),
+        })
         .build();
-    let mut worker =
-        Worker::new(&worker_runtime, worker_client, worker_options).expect("control Worker");
-    let shutdown_worker = worker.shutdown_handle();
-    let worker_task = tokio::task::spawn_local(async move { Box::pin(worker.run()).await });
+    let worker_v2_options = WorkerOptions::new(control_task_queue.clone())
+        .register_workflow::<TemporalTuiControlWorkflow>()
+        .expect("register second control Workflow")
+        .task_types(WorkerTaskTypes::workflow_only())
+        .deployment_options(WorkerDeploymentOptions {
+            version: WorkerDeploymentVersion {
+                deployment_name: control_deployment.clone(),
+                build_id: control_build_v2.clone(),
+            },
+            use_worker_versioning: true,
+            default_versioning_behavior: Some(VersioningBehavior::AutoUpgrade),
+        })
+        .build();
+    let mut worker_v1 = Worker::new(&worker_runtime, worker_client.clone(), worker_v1_options)
+        .expect("control Worker v1");
+    let mut worker_v2 =
+        Worker::new(&worker_runtime, worker_client, worker_v2_options).expect("control Worker v2");
+    let shutdown_worker_v1 = worker_v1.shutdown_handle();
+    let shutdown_worker_v2 = worker_v2.shutdown_handle();
+    let worker_v1_task = tokio::task::spawn_local(async move { Box::pin(worker_v1.run()).await });
+    let worker_v2_task = tokio::task::spawn_local(async move { Box::pin(worker_v2.run()).await });
+
+    eventually(Duration::from_secs(10), || async {
+        service
+            .describe_worker_deployment("default", &control_deployment)
+            .await
+            .ok()
+            .filter(|deployment| deployment.versions.len() >= 2)
+    })
+    .await
+    .expect("both Worker Deployment versions should register");
+    service
+        .set_worker_deployment_current_version("default", &control_deployment, &control_build_v1)
+        .await
+        .expect("set current Worker Deployment version");
+    service
+        .set_worker_deployment_ramping_version(
+            "default",
+            &control_deployment,
+            &control_build_v2,
+            25.0,
+        )
+        .await
+        .expect("set ramping Worker Deployment version");
+    let ramped = service
+        .describe_worker_deployment("default", &control_deployment)
+        .await
+        .expect("describe ramping Worker Deployment");
+    assert_eq!(
+        ramped
+            .summary
+            .current_version
+            .as_ref()
+            .map(|value| value.build_id.as_str()),
+        Some(control_build_v1.as_str())
+    );
+    assert_eq!(
+        ramped
+            .summary
+            .ramping_version
+            .as_ref()
+            .map(|value| value.build_id.as_str()),
+        Some(control_build_v2.as_str())
+    );
+    assert!((ramped.summary.ramping_percentage - 25.0).abs() < f32::EPSILON);
+    service
+        .set_worker_deployment_current_version("default", &control_deployment, &control_build_v2)
+        .await
+        .expect("promote ramping Worker Deployment version");
+    service
+        .set_worker_deployment_ramping_version("default", &control_deployment, "", 0.0)
+        .await
+        .expect("clear ramping Worker Deployment version");
+    let promoted = service
+        .describe_worker_deployment("default", &control_deployment)
+        .await
+        .expect("describe promoted Worker Deployment");
+    assert_eq!(
+        promoted
+            .summary
+            .current_version
+            .as_ref()
+            .map(|value| value.build_id.as_str()),
+        Some(control_build_v2.as_str())
+    );
+    assert!(promoted.summary.ramping_version.is_none());
     start_control_workflow(
         &temporal_cli,
         &address,
@@ -328,6 +450,139 @@ async fn run_live_dashboard_and_control_operations() {
     assert_eq!(second_page.workflows.len(), 1);
     assert_ne!(first_key, second_page.workflows[0].key);
 
+    let batch_workflow_type = format!("TemporalTuiBatchWorkflow{suffix}");
+    let batch_task_queue = format!("temporal-tui-batch-{suffix}");
+    for index in 0..4 {
+        start_unpolled_workflow(
+            &temporal_cli,
+            &address,
+            &format!("temporal-tui-batch-{suffix}-{index}"),
+            &batch_workflow_type,
+            &batch_task_queue,
+        );
+    }
+    let batch_query =
+        format!("WorkflowType = '{batch_workflow_type}' AND ExecutionStatus = 'Running'");
+    let batch_preview = eventually(Duration::from_secs(10), || async {
+        service
+            .count_workflows("default", &batch_query)
+            .await
+            .ok()
+            .filter(|count| count.total == 4)
+    })
+    .await
+    .expect("Batch Operation preview count");
+    assert_eq!(batch_preview.total, 4);
+    let cancel_batch_job_id = format!("temporal-tui-cancel-batch-{suffix}");
+    service
+        .start_batch_operation(
+            "default",
+            BatchOperationRequest {
+                job_id: cancel_batch_job_id.clone(),
+                visibility_query: batch_query,
+                reason: "live contract Batch cancellation".to_string(),
+                max_operations_per_second: 100.0,
+                kind: BatchOperationKind::Cancel,
+                signal_name: String::new(),
+                signal_input: serde_json::Value::Null,
+            },
+        )
+        .await
+        .expect("start Batch cancellation");
+    let completed_batch = eventually(Duration::from_secs(20), || async {
+        service
+            .describe_batch_operation("default", &cancel_batch_job_id)
+            .await
+            .ok()
+            .filter(|details| details.summary.state == "COMPLETED")
+    })
+    .await
+    .expect("Batch cancellation should complete");
+    assert_eq!(completed_batch.operation_type, "CANCEL");
+    assert_eq!(completed_batch.total_operation_count, 4);
+    assert_eq!(completed_batch.complete_operation_count, 4);
+    assert_eq!(completed_batch.failure_operation_count, 0);
+
+    let stopped_batch_workflow_type = format!("TemporalTuiStoppedBatchWorkflow{suffix}");
+    let stopped_batch_task_queue = format!("temporal-tui-stopped-batch-{suffix}");
+    for index in 0..8 {
+        start_unpolled_workflow(
+            &temporal_cli,
+            &address,
+            &format!("temporal-tui-stopped-batch-{suffix}-{index}"),
+            &stopped_batch_workflow_type,
+            &stopped_batch_task_queue,
+        );
+    }
+    let stopped_batch_query =
+        format!("WorkflowType = '{stopped_batch_workflow_type}' AND ExecutionStatus = 'Running'");
+    eventually(Duration::from_secs(10), || async {
+        service
+            .count_workflows("default", &stopped_batch_query)
+            .await
+            .ok()
+            .filter(|count| count.total == 8)
+    })
+    .await
+    .expect("stoppable Batch Operation preview count");
+    let stopped_batch_job_id = format!("temporal-tui-stopped-batch-{suffix}");
+    service
+        .start_batch_operation(
+            "default",
+            BatchOperationRequest {
+                job_id: stopped_batch_job_id.clone(),
+                visibility_query: stopped_batch_query,
+                reason: "live contract stoppable Batch termination".to_string(),
+                max_operations_per_second: 0.1,
+                kind: BatchOperationKind::Terminate,
+                signal_name: String::new(),
+                signal_input: serde_json::Value::Null,
+            },
+        )
+        .await
+        .expect("start stoppable Batch termination");
+    eventually(Duration::from_secs(10), || async {
+        service
+            .describe_batch_operation("default", &stopped_batch_job_id)
+            .await
+            .ok()
+            .filter(|details| details.summary.state == "RUNNING")
+    })
+    .await
+    .expect("Batch termination should enter RUNNING state");
+    service
+        .stop_batch_operation("default", &stopped_batch_job_id, "live contract stop")
+        .await
+        .expect("stop Batch termination");
+    let stopped_batch = eventually(Duration::from_secs(10), || async {
+        service
+            .describe_batch_operation("default", &stopped_batch_job_id)
+            .await
+            .ok()
+            .filter(|details| details.summary.state != "RUNNING")
+    })
+    .await
+    .expect("stopped Batch termination should leave RUNNING state");
+    assert_eq!(stopped_batch.operation_type, "TERMINATE");
+    assert_eq!(stopped_batch.summary.state, "FAILED");
+    assert!(stopped_batch.summary.close_time.is_some());
+
+    let first_batch_page = service
+        .list_batch_operations("default", 1, Vec::new())
+        .await
+        .expect("first Batch Operation cursor page");
+    assert_eq!(first_batch_page.operations.len(), 1);
+    assert!(!first_batch_page.next_page_token.is_empty());
+    let second_batch_page = service
+        .list_batch_operations("default", 1, first_batch_page.next_page_token)
+        .await
+        .expect("second Batch Operation cursor page");
+    assert_eq!(second_batch_page.operations.len(), 1);
+    assert_ne!(
+        first_batch_page.operations[0].job_id,
+        second_batch_page.operations[0].job_id
+    );
+
     let query = format!("WorkflowId = '{workflow_id}'");
     let workflow = eventually(Duration::from_secs(10), || async {
         service
@@ -391,7 +646,14 @@ async fn run_live_dashboard_and_control_operations() {
         .list_worker_deployments("default", 10, Vec::new())
         .await
         .expect("GA Worker Deployment endpoint");
-    assert!(deployments.deployments.is_empty());
+    assert!(deployments.deployments.iter().any(|deployment| {
+        deployment.name == control_deployment
+            && deployment
+                .current_version
+                .as_ref()
+                .is_some_and(|version| version.build_id == control_build_v2)
+            && deployment.ramping_version.is_none()
+    }));
     assert!(deployments.next_page_token.is_empty());
 
     let chain = service
@@ -843,13 +1105,42 @@ async fn run_live_dashboard_and_control_operations() {
                 .expect("terminate Schedule-triggered Workflow");
         }
     }
+    for batch_type in [&batch_workflow_type, &stopped_batch_workflow_type] {
+        let batch_workflows = service
+            .list_workflows(
+                "default",
+                &format!("WorkflowType = '{batch_type}'"),
+                100,
+                Vec::new(),
+            )
+            .await
+            .expect("list Batch Operation cleanup Workflows");
+        for batch_workflow in batch_workflows.workflows {
+            if batch_workflow.status.is_running() {
+                service
+                    .terminate_workflow(
+                        "default",
+                        &batch_workflow.key,
+                        "live contract Batch Operation cleanup",
+                    )
+                    .await
+                    .expect("terminate Batch Operation cleanup Workflow");
+            }
+        }
+    }
 
-    shutdown_worker();
-    let worker_result = tokio::time::timeout(Duration::from_secs(10), worker_task)
+    shutdown_worker_v1();
+    shutdown_worker_v2();
+    let worker_v1_result = tokio::time::timeout(Duration::from_secs(10), worker_v1_task)
         .await
-        .expect("control Worker shutdown timeout")
-        .expect("join control Worker");
-    worker_result.expect("control Worker result");
+        .expect("control Worker v1 shutdown timeout")
+        .expect("join control Worker v1");
+    worker_v1_result.expect("control Worker v1 result");
+    let worker_v2_result = tokio::time::timeout(Duration::from_secs(10), worker_v2_task)
+        .await
+        .expect("control Worker v2 shutdown timeout")
+        .expect("join control Worker v2");
+    worker_v2_result.expect("control Worker v2 result");
 }
 
 fn temporal_cli() -> PathBuf {
@@ -933,6 +1224,22 @@ fn run_cli(temporal_cli: &PathBuf, arguments: &[&str]) {
 }
 
 fn start_smoke_workflow(temporal_cli: &PathBuf, address: &str, workflow_id: &str) {
+    start_unpolled_workflow(
+        temporal_cli,
+        address,
+        workflow_id,
+        "TemporalTuiSmokeWorkflow",
+        "temporal-tui-smoke",
+    );
+}
+
+fn start_unpolled_workflow(
+    temporal_cli: &PathBuf,
+    address: &str,
+    workflow_id: &str,
+    workflow_type: &str,
+    task_queue: &str,
+) {
     run_cli(
         temporal_cli,
         &[
@@ -945,9 +1252,9 @@ fn start_smoke_workflow(temporal_cli: &PathBuf, address: &str, workflow_id: &str
             "--workflow-id",
             workflow_id,
             "--type",
-            "TemporalTuiSmokeWorkflow",
+            workflow_type,
             "--task-queue",
-            "temporal-tui-smoke",
+            task_queue,
             "--static-summary",
             "Temporal TUI live smoke test",
             "--input",

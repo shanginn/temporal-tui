@@ -27,6 +27,10 @@ use temporalio_common::{
     protos::{
         proto_ts_to_system_time,
         temporal::api::{
+            batch::v1::{
+                BatchOperationCancellation, BatchOperationDeletion, BatchOperationInfo,
+                BatchOperationSignal, BatchOperationTermination,
+            },
             common::v1::{
                 Payload, Payloads, WorkflowExecution as ProtoWorkflowExecution, WorkflowType,
             },
@@ -35,13 +39,18 @@ use temporalio_common::{
                 WorkerDeploymentVersion as ProtoDeploymentVersion,
             },
             enums::v1::{
-                EventType, PendingActivityState, RoutingConfigUpdateState, ScheduleOverlapPolicy,
+                BatchOperationState, BatchOperationType, EventType, IndexedValueType,
+                PendingActivityState, RoutingConfigUpdateState, ScheduleOverlapPolicy,
                 TaskQueueType as ProtoTaskQueueType, UpdateWorkflowExecutionLifecycleStage,
                 VersionDrainageStatus, WorkerDeploymentVersionStatus, WorkerStatus,
                 WorkflowExecutionStatus,
             },
             failure::v1::{Failure, failure::FailureInfo},
             history::v1::{HistoryEvent, history_event::Attributes},
+            operatorservice::v1::{
+                AddSearchAttributesRequest, ListSearchAttributesRequest,
+                RemoveSearchAttributesRequest,
+            },
             query::v1::WorkflowQuery,
             schedule::v1::{
                 BackfillRequest as ProtoScheduleBackfillRequest, CalendarSpec, IntervalSpec, Range,
@@ -59,17 +68,22 @@ use temporalio_common::{
             workflow::v1::{NewWorkflowExecutionInfo, PendingActivityInfo},
             workflowservice::v1::{
                 CountWorkflowExecutionsRequest, CreateScheduleRequest, DeleteScheduleRequest,
+                DescribeBatchOperationRequest, DescribeBatchOperationResponse,
                 DescribeNamespaceResponse, DescribeScheduleRequest, DescribeScheduleResponse,
                 DescribeTaskQueueRequest, DescribeTaskQueueResponse,
-                DescribeWorkerDeploymentRequest, DescribeWorkerRequest, GetClusterInfoRequest,
-                GetWorkflowExecutionHistoryReverseRequest, ListNamespacesRequest,
-                ListSchedulesRequest, ListWorkerDeploymentsRequest, ListWorkersRequest,
-                ListWorkflowExecutionsRequest, PatchScheduleRequest, PauseWorkflowExecutionRequest,
-                PollWorkflowExecutionUpdateRequest, QueryWorkflowRequest,
-                ResetWorkflowExecutionRequest, SignalWorkflowExecutionRequest,
-                UnpauseWorkflowExecutionRequest,
+                DescribeWorkerDeploymentRequest, DescribeWorkerDeploymentResponse,
+                DescribeWorkerRequest, GetClusterInfoRequest,
+                GetWorkflowExecutionHistoryReverseRequest, ListBatchOperationsRequest,
+                ListNamespacesRequest, ListSchedulesRequest, ListWorkerDeploymentsRequest,
+                ListWorkersRequest, ListWorkflowExecutionsRequest, PatchScheduleRequest,
+                PauseWorkflowExecutionRequest, PollWorkflowExecutionUpdateRequest,
+                QueryWorkflowRequest, ResetWorkflowExecutionRequest,
+                SetWorkerDeploymentCurrentVersionRequest, SetWorkerDeploymentRampingVersionRequest,
+                SignalWorkflowExecutionRequest, StartBatchOperationRequest,
+                StopBatchOperationRequest, UnpauseWorkflowExecutionRequest,
                 UpdateScheduleRequest as ProtoUpdateScheduleRequest,
                 UpdateWorkflowExecutionRequest, list_worker_deployments_response,
+                start_batch_operation_request,
             },
         },
     },
@@ -78,13 +92,15 @@ use thiserror::Error;
 use url::Url;
 
 use crate::model::{
-    ClusterInfo, DeploymentVersion, DeploymentVersionSummary, FailureSummary, HistoryEventSummary,
-    HistoryPage, NamespaceSummary, PendingActivitySummary, PollerSummary, ScheduleActionResult,
-    ScheduleBackfillRequest, ScheduleCreateRequest, ScheduleDetails, SchedulePage, ScheduleSummary,
-    ScheduleUpdateRequest, StructuredField, TaskQueueStats, TaskQueueSummary, TaskQueueType,
-    WorkerDeploymentDetails, WorkerDeploymentPage, WorkerDeploymentSummary, WorkerDetails,
-    WorkerPage, WorkerSlots, WorkerSummary, WorkflowCallResult, WorkflowCount, WorkflowCountGroup,
-    WorkflowDetails, WorkflowKey, WorkflowPage, WorkflowStatus, WorkflowSummary,
+    BatchOperationDetails, BatchOperationKind, BatchOperationPage, BatchOperationRequest,
+    BatchOperationSummary, ClusterInfo, DeploymentVersion, DeploymentVersionSummary,
+    FailureSummary, HistoryEventSummary, HistoryPage, NamespaceSummary, PendingActivitySummary,
+    PollerSummary, ScheduleActionResult, ScheduleBackfillRequest, ScheduleCreateRequest,
+    ScheduleDetails, SchedulePage, ScheduleSummary, ScheduleUpdateRequest, SearchAttributeSummary,
+    StructuredField, TaskQueueStats, TaskQueueSummary, TaskQueueType, WorkerDeploymentDetails,
+    WorkerDeploymentPage, WorkerDeploymentSummary, WorkerDetails, WorkerPage, WorkerSlots,
+    WorkerSummary, WorkflowCallResult, WorkflowCount, WorkflowCountGroup, WorkflowDetails,
+    WorkflowKey, WorkflowPage, WorkflowStatus, WorkflowSummary,
 };
 
 /// TLS settings loaded by the client at startup.
@@ -654,6 +670,65 @@ pub trait TemporalService: Send + Sync {
         name: &str,
     ) -> Result<WorkerDeploymentDetails, ServiceError>;
 
+    async fn list_search_attributes(
+        &self,
+        namespace: &str,
+    ) -> Result<Vec<SearchAttributeSummary>, ServiceError>;
+
+    async fn add_search_attribute(
+        &self,
+        namespace: &str,
+        name: &str,
+        value_type: &str,
+    ) -> Result<(), ServiceError>;
+
+    async fn remove_search_attribute(
+        &self,
+        namespace: &str,
+        name: &str,
+    ) -> Result<(), ServiceError>;
+
+    async fn set_worker_deployment_current_version(
+        &self,
+        namespace: &str,
+        deployment_name: &str,
+        build_id: &str,
+    ) -> Result<(), ServiceError>;
+
+    async fn set_worker_deployment_ramping_version(
+        &self,
+        namespace: &str,
+        deployment_name: &str,
+        build_id: &str,
+        percentage: f32,
+    ) -> Result<(), ServiceError>;
+
+    async fn list_batch_operations(
+        &self,
+        namespace: &str,
+        page_size: usize,
+        next_page_token: Vec<u8>,
+    ) -> Result<BatchOperationPage, ServiceError>;
+
+    async fn describe_batch_operation(
+        &self,
+        namespace: &str,
+        job_id: &str,
+    ) -> Result<BatchOperationDetails, ServiceError>;
+
+    async fn start_batch_operation(
+        &self,
+        namespace: &str,
+        request: BatchOperationRequest,
+    ) -> Result<(), ServiceError>;
+
+    async fn stop_batch_operation(
+        &self,
+        namespace: &str,
+        job_id: &str,
+        reason: &str,
+    ) -> Result<(), ServiceError>;
+
     async fn query_workflow(
         &self,
         namespace: &str,
@@ -924,6 +999,28 @@ impl GrpcTemporalService {
             .await
             .map_err(|source| ServiceError::Rpc {
                 operation: "describe schedule",
+                source,
+            })
+            .map(temporalio_client::tonic::Response::into_inner)
+    }
+
+    async fn describe_worker_deployment_raw(
+        &self,
+        namespace: &str,
+        name: &str,
+    ) -> Result<DescribeWorkerDeploymentResponse, ServiceError> {
+        let mut service = self.connection.workflow_service();
+        service
+            .describe_worker_deployment(
+                DescribeWorkerDeploymentRequest {
+                    namespace: namespace.to_string(),
+                    deployment_name: name.to_string(),
+                }
+                .into_request(),
+            )
+            .await
+            .map_err(|source| ServiceError::Rpc {
+                operation: "describe worker deployment",
                 source,
             })
             .map(temporalio_client::tonic::Response::into_inner)
@@ -1385,21 +1482,7 @@ impl TemporalService for GrpcTemporalService {
         namespace: &str,
         name: &str,
     ) -> Result<WorkerDeploymentDetails, ServiceError> {
-        let mut service = self.connection.workflow_service();
-        let response = service
-            .describe_worker_deployment(
-                DescribeWorkerDeploymentRequest {
-                    namespace: namespace.to_string(),
-                    deployment_name: name.to_string(),
-                }
-                .into_request(),
-            )
-            .await
-            .map_err(|source| ServiceError::Rpc {
-                operation: "describe worker deployment",
-                source,
-            })?
-            .into_inner();
+        let response = self.describe_worker_deployment_raw(namespace, name).await?;
         let info = response
             .worker_deployment_info
             .ok_or_else(|| ServiceError::Client {
@@ -1407,6 +1490,342 @@ impl TemporalService for GrpcTemporalService {
                 message: "response did not include deployment information".to_string(),
             })?;
         Ok(worker_deployment_details(&info))
+    }
+
+    async fn list_search_attributes(
+        &self,
+        namespace: &str,
+    ) -> Result<Vec<SearchAttributeSummary>, ServiceError> {
+        let mut service = self.connection.operator_service();
+        let response = service
+            .list_search_attributes(
+                ListSearchAttributesRequest {
+                    namespace: namespace.to_string(),
+                }
+                .into_request(),
+            )
+            .await
+            .map_err(|source| ServiceError::Rpc {
+                operation: "list search attributes",
+                source,
+            })?
+            .into_inner();
+        let mut attributes = response
+            .system_attributes
+            .into_iter()
+            .map(|(name, value_type)| SearchAttributeSummary {
+                storage_type: response
+                    .storage_schema
+                    .get(&name)
+                    .cloned()
+                    .unwrap_or_default(),
+                name,
+                value_type: enum_label::<IndexedValueType>(value_type),
+                custom: false,
+            })
+            .chain(
+                response
+                    .custom_attributes
+                    .into_iter()
+                    .map(|(name, value_type)| SearchAttributeSummary {
+                        storage_type: response
+                            .storage_schema
+                            .get(&name)
+                            .cloned()
+                            .unwrap_or_default(),
+                        name,
+                        value_type: enum_label::<IndexedValueType>(value_type),
+                        custom: true,
+                    }),
+            )
+            .collect::<Vec<_>>();
+        attributes.sort_by(|left, right| {
+            right
+                .custom
+                .cmp(&left.custom)
+                .then_with(|| left.name.cmp(&right.name))
+        });
+        Ok(attributes)
+    }
+
+    async fn add_search_attribute(
+        &self,
+        namespace: &str,
+        name: &str,
+        value_type: &str,
+    ) -> Result<(), ServiceError> {
+        let value_type = parse_search_attribute_type(value_type)?;
+        let mut service = self.connection.operator_service();
+        service
+            .add_search_attributes(
+                AddSearchAttributesRequest {
+                    search_attributes: HashMap::from([(name.to_string(), value_type as i32)]),
+                    namespace: namespace.to_string(),
+                }
+                .into_request(),
+            )
+            .await
+            .map_err(|source| ServiceError::Rpc {
+                operation: "add search attribute",
+                source,
+            })
+            .map(|_| ())
+    }
+
+    async fn remove_search_attribute(
+        &self,
+        namespace: &str,
+        name: &str,
+    ) -> Result<(), ServiceError> {
+        let mut service = self.connection.operator_service();
+        service
+            .remove_search_attributes(
+                RemoveSearchAttributesRequest {
+                    search_attributes: vec![name.to_string()],
+                    namespace: namespace.to_string(),
+                }
+                .into_request(),
+            )
+            .await
+            .map_err(|source| ServiceError::Rpc {
+                operation: "remove search attribute",
+                source,
+            })
+            .map(|_| ())
+    }
+
+    async fn set_worker_deployment_current_version(
+        &self,
+        namespace: &str,
+        deployment_name: &str,
+        build_id: &str,
+    ) -> Result<(), ServiceError> {
+        let described = self
+            .describe_worker_deployment_raw(namespace, deployment_name)
+            .await?;
+        validate_deployment_build_id(
+            described.worker_deployment_info.as_ref(),
+            build_id,
+            "set current Worker Deployment version",
+        )?;
+        let mut service = self.connection.workflow_service();
+        service
+            .set_worker_deployment_current_version(
+                SetWorkerDeploymentCurrentVersionRequest {
+                    namespace: namespace.to_string(),
+                    deployment_name: deployment_name.to_string(),
+                    build_id: build_id.to_string(),
+                    conflict_token: described.conflict_token,
+                    identity: client_identity(),
+                    ignore_missing_task_queues: false,
+                    allow_no_pollers: false,
+                    ..Default::default()
+                }
+                .into_request(),
+            )
+            .await
+            .map_err(|source| ServiceError::Rpc {
+                operation: "set current Worker Deployment version",
+                source,
+            })
+            .map(|_| ())
+    }
+
+    async fn set_worker_deployment_ramping_version(
+        &self,
+        namespace: &str,
+        deployment_name: &str,
+        build_id: &str,
+        percentage: f32,
+    ) -> Result<(), ServiceError> {
+        if !percentage.is_finite() || !(0.0..=100.0).contains(&percentage) {
+            return Err(ServiceError::Client {
+                operation: "set ramping Worker Deployment version",
+                message: "ramp percentage must be between 0 and 100".to_string(),
+            });
+        }
+        if build_id.is_empty() && percentage != 0.0 {
+            return Err(ServiceError::Client {
+                operation: "set ramping Worker Deployment version",
+                message: "clearing the ramping version requires a 0% ramp".to_string(),
+            });
+        }
+        let described = self
+            .describe_worker_deployment_raw(namespace, deployment_name)
+            .await?;
+        validate_deployment_build_id(
+            described.worker_deployment_info.as_ref(),
+            build_id,
+            "set ramping Worker Deployment version",
+        )?;
+        let mut service = self.connection.workflow_service();
+        service
+            .set_worker_deployment_ramping_version(
+                SetWorkerDeploymentRampingVersionRequest {
+                    namespace: namespace.to_string(),
+                    deployment_name: deployment_name.to_string(),
+                    build_id: build_id.to_string(),
+                    percentage,
+                    conflict_token: described.conflict_token,
+                    identity: client_identity(),
+                    ignore_missing_task_queues: false,
+                    allow_no_pollers: false,
+                    ..Default::default()
+                }
+                .into_request(),
+            )
+            .await
+            .map_err(|source| ServiceError::Rpc {
+                operation: "set ramping Worker Deployment version",
+                source,
+            })
+            .map(|_| ())
+    }
+
+    async fn list_batch_operations(
+        &self,
+        namespace: &str,
+        page_size: usize,
+        next_page_token: Vec<u8>,
+    ) -> Result<BatchOperationPage, ServiceError> {
+        let mut service = self.connection.workflow_service();
+        let response = service
+            .list_batch_operations(
+                ListBatchOperationsRequest {
+                    namespace: namespace.to_string(),
+                    page_size: i32::try_from(page_size).unwrap_or(i32::MAX),
+                    next_page_token,
+                }
+                .into_request(),
+            )
+            .await
+            .map_err(|source| ServiceError::Rpc {
+                operation: "list batch operations",
+                source,
+            })?
+            .into_inner();
+        Ok(BatchOperationPage {
+            operations: response
+                .operation_info
+                .iter()
+                .map(batch_operation_summary)
+                .collect(),
+            next_page_token: response.next_page_token,
+        })
+    }
+
+    async fn describe_batch_operation(
+        &self,
+        namespace: &str,
+        job_id: &str,
+    ) -> Result<BatchOperationDetails, ServiceError> {
+        let mut service = self.connection.workflow_service();
+        let response = service
+            .describe_batch_operation(
+                DescribeBatchOperationRequest {
+                    namespace: namespace.to_string(),
+                    job_id: job_id.to_string(),
+                }
+                .into_request(),
+            )
+            .await
+            .map_err(|source| ServiceError::Rpc {
+                operation: "describe batch operation",
+                source,
+            })?
+            .into_inner();
+        Ok(batch_operation_details(&response))
+    }
+
+    async fn start_batch_operation(
+        &self,
+        namespace: &str,
+        request: BatchOperationRequest,
+    ) -> Result<(), ServiceError> {
+        validate_batch_operation_request(&request)?;
+        let operation = match request.kind {
+            BatchOperationKind::Cancel => {
+                start_batch_operation_request::Operation::CancellationOperation(
+                    BatchOperationCancellation {
+                        identity: client_identity(),
+                    },
+                )
+            }
+            BatchOperationKind::Terminate => {
+                let details = self
+                    .encode_json_arguments(namespace, &[Value::String(request.reason.clone())])
+                    .await?;
+                start_batch_operation_request::Operation::TerminationOperation(
+                    BatchOperationTermination {
+                        details: Some(details),
+                        identity: client_identity(),
+                    },
+                )
+            }
+            BatchOperationKind::Signal => {
+                let input = self
+                    .encode_json_arguments(namespace, std::slice::from_ref(&request.signal_input))
+                    .await?;
+                start_batch_operation_request::Operation::SignalOperation(BatchOperationSignal {
+                    signal: request.signal_name.clone(),
+                    input: Some(input),
+                    header: None,
+                    identity: client_identity(),
+                })
+            }
+            BatchOperationKind::Delete => {
+                start_batch_operation_request::Operation::DeletionOperation(
+                    BatchOperationDeletion {
+                        identity: client_identity(),
+                    },
+                )
+            }
+        };
+        let mut service = self.connection.workflow_service();
+        service
+            .start_batch_operation(
+                StartBatchOperationRequest {
+                    namespace: namespace.to_string(),
+                    visibility_query: request.visibility_query,
+                    job_id: request.job_id,
+                    reason: request.reason,
+                    executions: Vec::new(),
+                    max_operations_per_second: request.max_operations_per_second,
+                    operation: Some(operation),
+                }
+                .into_request(),
+            )
+            .await
+            .map_err(|source| ServiceError::Rpc {
+                operation: "start batch operation",
+                source,
+            })
+            .map(|_| ())
+    }
+
+    async fn stop_batch_operation(
+        &self,
+        namespace: &str,
+        job_id: &str,
+        reason: &str,
+    ) -> Result<(), ServiceError> {
+        let mut service = self.connection.workflow_service();
+        service
+            .stop_batch_operation(
+                StopBatchOperationRequest {
+                    namespace: namespace.to_string(),
+                    job_id: job_id.to_string(),
+                    reason: reason.to_string(),
+                    identity: client_identity(),
+                }
+                .into_request(),
+            )
+            .await
+            .map_err(|source| ServiceError::Rpc {
+                operation: "stop batch operation",
+                source,
+            })
+            .map(|_| ())
     }
 
     async fn query_workflow(
@@ -2252,6 +2671,26 @@ fn format_ranges(ranges: &[Range]) -> String {
         .join(",")
 }
 
+fn parse_search_attribute_type(value: &str) -> Result<IndexedValueType, ServiceError> {
+    let normalized = value.trim().to_ascii_lowercase().replace(['_', '-'], "");
+    match normalized.as_str() {
+        "text" => Ok(IndexedValueType::Text),
+        "keyword" => Ok(IndexedValueType::Keyword),
+        "int" | "integer" => Ok(IndexedValueType::Int),
+        "double" | "float" => Ok(IndexedValueType::Double),
+        "bool" | "boolean" => Ok(IndexedValueType::Bool),
+        "datetime" | "timestamp" => Ok(IndexedValueType::Datetime),
+        "keywordlist" => Ok(IndexedValueType::KeywordList),
+        _ => Err(ServiceError::Client {
+            operation: "add search attribute",
+            message: format!(
+                "unknown Search Attribute type `{value}`; use Text, Keyword, Int, Double, Bool, \
+                 Datetime, or KeywordList"
+            ),
+        }),
+    }
+}
+
 fn parse_schedule_overlap_policy(value: &str) -> Result<ScheduleOverlapPolicy, ServiceError> {
     let normalized = value.trim().to_ascii_lowercase().replace(['_', ' '], "-");
     match normalized.as_str() {
@@ -2589,6 +3028,94 @@ fn worker_deployment_details(info: &ProtoWorkerDeploymentInfo) -> WorkerDeployme
             info.routing_config_update_state,
         ),
     }
+}
+
+fn validate_deployment_build_id(
+    info: Option<&ProtoWorkerDeploymentInfo>,
+    build_id: &str,
+    operation: &'static str,
+) -> Result<(), ServiceError> {
+    let info = info.ok_or_else(|| ServiceError::Client {
+        operation,
+        message: "response did not include Worker Deployment information".to_string(),
+    })?;
+    if build_id.is_empty()
+        || info.version_summaries.iter().any(|summary| {
+            summary
+                .deployment_version
+                .as_ref()
+                .is_some_and(|version| version.build_id == build_id)
+        })
+    {
+        return Ok(());
+    }
+    Err(ServiceError::Client {
+        operation,
+        message: format!(
+            "build ID `{build_id}` is not tracked by Worker Deployment `{}`",
+            info.name
+        ),
+    })
+}
+
+fn batch_operation_summary(info: &BatchOperationInfo) -> BatchOperationSummary {
+    BatchOperationSummary {
+        job_id: info.job_id.clone(),
+        state: enum_label::<BatchOperationState>(info.state),
+        start_time: info.start_time.as_ref().and_then(proto_datetime),
+        close_time: info.close_time.as_ref().and_then(proto_datetime),
+    }
+}
+
+fn batch_operation_details(response: &DescribeBatchOperationResponse) -> BatchOperationDetails {
+    BatchOperationDetails {
+        summary: BatchOperationSummary {
+            job_id: response.job_id.clone(),
+            state: enum_label::<BatchOperationState>(response.state),
+            start_time: response.start_time.as_ref().and_then(proto_datetime),
+            close_time: response.close_time.as_ref().and_then(proto_datetime),
+        },
+        operation_type: enum_label::<BatchOperationType>(response.operation_type),
+        total_operation_count: response.total_operation_count,
+        complete_operation_count: response.complete_operation_count,
+        failure_operation_count: response.failure_operation_count,
+        identity: response.identity.clone(),
+        reason: response.reason.clone(),
+    }
+}
+
+fn validate_batch_operation_request(request: &BatchOperationRequest) -> Result<(), ServiceError> {
+    if request.job_id.trim().is_empty() {
+        return Err(ServiceError::Client {
+            operation: "start batch operation",
+            message: "job ID must not be empty".to_string(),
+        });
+    }
+    if request.visibility_query.trim().is_empty() {
+        return Err(ServiceError::Client {
+            operation: "start batch operation",
+            message: "a non-empty Visibility query is required".to_string(),
+        });
+    }
+    if request.reason.trim().is_empty() {
+        return Err(ServiceError::Client {
+            operation: "start batch operation",
+            message: "reason must not be empty".to_string(),
+        });
+    }
+    if !request.max_operations_per_second.is_finite() || request.max_operations_per_second < 0.0 {
+        return Err(ServiceError::Client {
+            operation: "start batch operation",
+            message: "maximum operations per second must be zero or greater".to_string(),
+        });
+    }
+    if request.kind == BatchOperationKind::Signal && request.signal_name.trim().is_empty() {
+        return Err(ServiceError::Client {
+            operation: "start batch operation",
+            message: "signal batch requires a signal name".to_string(),
+        });
+    }
+    Ok(())
 }
 
 fn deployment_version(version: &ProtoDeploymentVersion) -> DeploymentVersion {
@@ -3090,6 +3617,23 @@ mod tests {
     }
 
     #[test]
+    fn search_attribute_types_are_explicit_and_forward_safe() {
+        assert_eq!(
+            parse_search_attribute_type("KeywordList").unwrap(),
+            IndexedValueType::KeywordList
+        );
+        assert_eq!(
+            parse_search_attribute_type("boolean").unwrap(),
+            IndexedValueType::Bool
+        );
+        assert!(parse_search_attribute_type("json").is_err());
+        assert_eq!(
+            enum_label::<IndexedValueType>(IndexedValueType::Datetime as i32),
+            "DATETIME"
+        );
+    }
+
+    #[test]
     fn maps_visibility_workflow_without_panicking_on_missing_fields() {
         let info = ProtoWorkflowExecutionInfo {
             execution: Some(WorkflowExecution {
@@ -3331,6 +3875,98 @@ mod tests {
         assert_eq!(details.versions[1].drainage_status, "DRAINED");
         assert_eq!(details.manager_identity, "release-controller");
         assert_eq!(details.routing_update_state, "COMPLETED");
+    }
+
+    #[test]
+    fn deployment_mutations_accept_only_tracked_or_unversioned_builds() {
+        let info = ProtoWorkerDeploymentInfo {
+            name: "payments".to_string(),
+            version_summaries: vec![WorkerDeploymentVersionSummary {
+                deployment_version: Some(WorkerDeploymentVersion {
+                    deployment_name: "payments".to_string(),
+                    build_id: "2026.07.28".to_string(),
+                }),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        assert!(
+            validate_deployment_build_id(
+                Some(&info),
+                "2026.07.28",
+                "set current Worker Deployment version"
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_deployment_build_id(Some(&info), "", "set current Worker Deployment version")
+                .is_ok()
+        );
+        assert!(
+            validate_deployment_build_id(
+                Some(&info),
+                "missing",
+                "set current Worker Deployment version"
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn maps_and_validates_server_side_batch_operations() {
+        let info = BatchOperationInfo {
+            job_id: "cancel-stale-orders".to_string(),
+            state: BatchOperationState::Running as i32,
+            start_time: Some(prost_wkt_types::Timestamp {
+                seconds: 1_800_000_000,
+                nanos: 0,
+            }),
+            ..Default::default()
+        };
+        let summary = batch_operation_summary(&info);
+        assert_eq!(summary.job_id, "cancel-stale-orders");
+        assert_eq!(summary.state, "RUNNING");
+        assert!(summary.start_time.is_some());
+
+        let details = batch_operation_details(&DescribeBatchOperationResponse {
+            operation_type: BatchOperationType::Cancel as i32,
+            job_id: info.job_id,
+            state: BatchOperationState::Completed as i32,
+            total_operation_count: 12,
+            complete_operation_count: 11,
+            failure_operation_count: 1,
+            identity: "operator".to_string(),
+            reason: "stale orders".to_string(),
+            ..Default::default()
+        });
+        assert_eq!(details.operation_type, "CANCEL");
+        assert_eq!(details.total_operation_count, 12);
+        assert_eq!(details.failure_operation_count, 1);
+
+        let valid = BatchOperationRequest {
+            job_id: "job-1".to_string(),
+            visibility_query: "WorkflowType = 'OrderWorkflow'".to_string(),
+            reason: "operator request".to_string(),
+            max_operations_per_second: 10.0,
+            kind: BatchOperationKind::Cancel,
+            signal_name: String::new(),
+            signal_input: Value::Null,
+        };
+        assert!(validate_batch_operation_request(&valid).is_ok());
+        assert!(
+            validate_batch_operation_request(&BatchOperationRequest {
+                visibility_query: String::new(),
+                ..valid.clone()
+            })
+            .is_err()
+        );
+        assert!(
+            validate_batch_operation_request(&BatchOperationRequest {
+                kind: BatchOperationKind::Signal,
+                ..valid
+            })
+            .is_err()
+        );
     }
 
     #[test]

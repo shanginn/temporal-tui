@@ -39,8 +39,6 @@ the disposable-server contract both pass.
 - Live Rust SDK Worker coverage for Query, Update, pause, unpause, and reset;
   disposable-server coverage for the complete Schedule and Codec lifecycle.
 
-## In progress
-
 ### v0.5 — fleet operations
 
 - Switch between configured clusters inside the TUI with a complete state reset
@@ -52,7 +50,9 @@ the disposable-server contract both pass.
 - Set Worker Deployment current/ramping versions, ramp percentages, and
   promotion state with drainage-aware warnings.
 
-## v1.0 release
+## In progress
+
+### v1.0 — production release
 
 - Negotiate and display server capabilities; degrade unavailable APIs without
   losing the rest of the dashboard.

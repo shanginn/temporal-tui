@@ -9,11 +9,12 @@ use serde_json::Value;
 use url::Url;
 
 use crate::model::{
-    ClusterInfo, HistoryPage, NamespaceSummary, ScheduleBackfillRequest, ScheduleCreateRequest,
-    ScheduleDetails, SchedulePage, ScheduleSummary, ScheduleUpdateRequest, TaskQueueSummary,
-    WorkerDeploymentDetails, WorkerDeploymentPage, WorkerDeploymentSummary, WorkerDetails,
-    WorkerPage, WorkerSummary, WorkflowCallResult, WorkflowCount, WorkflowDetails, WorkflowKey,
-    WorkflowPage, WorkflowStatus, WorkflowSummary,
+    BatchOperationDetails, BatchOperationKind, BatchOperationPage, BatchOperationRequest,
+    BatchOperationSummary, ClusterInfo, HistoryPage, NamespaceSummary, ScheduleBackfillRequest,
+    ScheduleCreateRequest, ScheduleDetails, SchedulePage, ScheduleSummary, ScheduleUpdateRequest,
+    SearchAttributeSummary, TaskQueueSummary, WorkerDeploymentDetails, WorkerDeploymentPage,
+    WorkerDeploymentSummary, WorkerDetails, WorkerPage, WorkerSummary, WorkflowCallResult,
+    WorkflowCount, WorkflowDetails, WorkflowKey, WorkflowPage, WorkflowStatus, WorkflowSummary,
 };
 
 /// Named visibility query loaded from the local config.
@@ -21,6 +22,28 @@ use crate::model::{
 pub struct SavedQuery {
     pub name: String,
     pub query: String,
+}
+
+/// Non-secret profile metadata shown by the in-process cluster switcher.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProfileSummary {
+    pub name: String,
+    pub address: String,
+    pub namespace: String,
+    pub read_only: bool,
+    pub codec_enabled: bool,
+    pub is_default: bool,
+}
+
+/// Connection-specific state applied only after a profile reconnect succeeds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProfileConnectionInfo {
+    pub name: String,
+    pub address: String,
+    pub namespace: String,
+    pub read_only: bool,
+    pub codec_enabled: bool,
+    pub web_ui_url: Option<String>,
 }
 
 /// Startup behavior and presentation preferences.
@@ -39,9 +62,11 @@ pub struct AppConfig {
     pub auto_refresh: bool,
     pub color: bool,
     pub read_only: bool,
+    pub force_read_only: bool,
     pub codec_enabled: bool,
     pub web_ui_url: Option<String>,
     pub saved_queries: Vec<SavedQuery>,
+    pub profiles: Vec<ProfileSummary>,
 }
 
 /// Which primary pane receives navigation keys.
@@ -59,6 +84,7 @@ pub enum View {
     Workers,
     Deployments,
     Schedules,
+    Batches,
 }
 
 impl View {
@@ -70,6 +96,7 @@ impl View {
             Self::Workers => 3,
             Self::Deployments => 4,
             Self::Schedules => 5,
+            Self::Batches => 6,
         }
     }
 
@@ -81,6 +108,19 @@ impl View {
             Self::Workers => "WORKERS",
             Self::Deployments => "DEPLOYMENTS",
             Self::Schedules => "SCHEDULES",
+            Self::Batches => "BATCHES",
+        }
+    }
+
+    #[must_use]
+    pub const fn short_label(self) -> &'static str {
+        match self {
+            Self::Workflows => "WF",
+            Self::TaskQueues => "TQ",
+            Self::Workers => "WORKERS",
+            Self::Deployments => "DEPLOY",
+            Self::Schedules => "SCHED",
+            Self::Batches => "BATCH",
         }
     }
 }
@@ -171,6 +211,29 @@ pub enum Overlay {
     },
     NamespacePicker {
         selected: usize,
+    },
+    ProfilePicker {
+        selected: usize,
+    },
+    SearchAttributes {
+        selected: usize,
+    },
+    SearchAttributeAdd(SearchAttributeAddForm),
+    SearchAttributeRemove {
+        name: String,
+        input: TextInput,
+    },
+    DeploymentCurrent(DeploymentCurrentForm),
+    DeploymentRamp(DeploymentRampForm),
+    BatchCreate(BatchCreateForm),
+    BatchConfirm {
+        form: BatchCreateForm,
+        matched_workflows: i64,
+        input: TextInput,
+    },
+    BatchStop {
+        job_id: String,
+        input: TextInput,
     },
     Confirm {
         action: ConfirmAction,
@@ -328,6 +391,106 @@ pub enum ResetField {
     Confirmation,
 }
 
+/// Add-Search-Attribute form with an explicit type and exact-name confirmation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SearchAttributeAddForm {
+    pub name: TextInput,
+    pub value_type: TextInput,
+    pub confirmation: TextInput,
+    pub active_field: SearchAttributeAddField,
+}
+
+impl Default for SearchAttributeAddForm {
+    fn default() -> Self {
+        Self {
+            name: TextInput::default(),
+            value_type: TextInput::new("Keyword"),
+            confirmation: TextInput::default(),
+            active_field: SearchAttributeAddField::Name,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SearchAttributeAddField {
+    Name,
+    ValueType,
+    Confirmation,
+}
+
+impl SearchAttributeAddField {
+    const ALL: [Self; 3] = [Self::Name, Self::ValueType, Self::Confirmation];
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeploymentCurrentForm {
+    pub deployment_name: String,
+    pub build_id: TextInput,
+    pub confirmation: TextInput,
+    pub active_field: DeploymentCurrentField,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeploymentCurrentField {
+    BuildId,
+    Confirmation,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeploymentRampForm {
+    pub deployment_name: String,
+    pub build_id: TextInput,
+    pub percentage: TextInput,
+    pub confirmation: TextInput,
+    pub active_field: DeploymentRampField,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeploymentRampField {
+    BuildId,
+    Percentage,
+    Confirmation,
+}
+
+impl DeploymentRampField {
+    const ALL: [Self; 3] = [Self::BuildId, Self::Percentage, Self::Confirmation];
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BatchCreateForm {
+    pub job_id: TextInput,
+    pub operation: TextInput,
+    pub visibility_query: TextInput,
+    pub reason: TextInput,
+    pub max_operations_per_second: TextInput,
+    pub signal_name: TextInput,
+    pub signal_input: TextInput,
+    pub active_field: BatchCreateField,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BatchCreateField {
+    JobId,
+    Operation,
+    VisibilityQuery,
+    Reason,
+    MaxOperationsPerSecond,
+    SignalName,
+    SignalInput,
+}
+
+impl BatchCreateField {
+    const ALL: [Self; 7] = [
+        Self::JobId,
+        Self::Operation,
+        Self::VisibilityQuery,
+        Self::Reason,
+        Self::MaxOperationsPerSecond,
+        Self::SignalName,
+        Self::SignalInput,
+    ];
+}
+
 /// Create-Schedule form.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScheduleCreateForm {
@@ -433,7 +596,13 @@ impl ScheduleBackfillField {
 /// Side effects requested by the pure application state machine.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Command {
-    LoadCluster,
+    LoadCluster {
+        request_id: u64,
+    },
+    SwitchProfile {
+        request_id: u64,
+        profile_name: String,
+    },
     LoadNamespaces {
         request_id: u64,
     },
@@ -504,6 +673,62 @@ pub enum Command {
         request_id: u64,
         namespace: String,
         schedule_id: String,
+    },
+    LoadSearchAttributes {
+        request_id: u64,
+        namespace: String,
+    },
+    AddSearchAttribute {
+        request_id: u64,
+        namespace: String,
+        name: String,
+        value_type: String,
+    },
+    RemoveSearchAttribute {
+        request_id: u64,
+        namespace: String,
+        name: String,
+    },
+    SetDeploymentCurrent {
+        request_id: u64,
+        namespace: String,
+        deployment_name: String,
+        build_id: String,
+    },
+    SetDeploymentRamp {
+        request_id: u64,
+        namespace: String,
+        deployment_name: String,
+        build_id: String,
+        percentage: f32,
+    },
+    LoadBatchOperations {
+        request_id: u64,
+        namespace: String,
+        page_size: usize,
+        next_page_token: Vec<u8>,
+    },
+    LoadBatchOperationDetails {
+        request_id: u64,
+        namespace: String,
+        job_id: String,
+    },
+    PreviewBatchOperation {
+        request_id: u64,
+        namespace: String,
+        form: BatchCreateForm,
+        request: BatchOperationRequest,
+    },
+    StartBatchOperation {
+        request_id: u64,
+        namespace: String,
+        request: BatchOperationRequest,
+    },
+    StopBatchOperation {
+        request_id: u64,
+        namespace: String,
+        job_id: String,
+        reason: String,
     },
     QueryWorkflow {
         request_id: u64,
@@ -615,7 +840,14 @@ pub enum Command {
 /// Result of an asynchronous command.
 #[derive(Debug)]
 pub enum Message {
-    ClusterLoaded(Result<ClusterInfo, String>),
+    ClusterLoaded {
+        request_id: u64,
+        result: Result<ClusterInfo, String>,
+    },
+    ProfileSwitchFinished {
+        request_id: u64,
+        result: Result<ProfileConnectionInfo, String>,
+    },
     NamespacesLoaded {
         request_id: u64,
         result: Result<Vec<NamespaceSummary>, String>,
@@ -668,6 +900,23 @@ pub enum Message {
         request_id: u64,
         result: Result<Box<ScheduleDetails>, String>,
     },
+    SearchAttributesLoaded {
+        request_id: u64,
+        result: Result<Vec<SearchAttributeSummary>, String>,
+    },
+    BatchOperationsLoaded {
+        request_id: u64,
+        result: Result<BatchOperationPage, String>,
+    },
+    BatchOperationDetailsLoaded {
+        request_id: u64,
+        result: Result<Box<BatchOperationDetails>, String>,
+    },
+    BatchOperationPreviewLoaded {
+        request_id: u64,
+        form: BatchCreateForm,
+        result: Result<i64, String>,
+    },
     WorkflowCallFinished {
         request_id: u64,
         kind: WorkflowCallKind,
@@ -712,6 +961,12 @@ pub enum OperationKind {
     TriggerSchedule,
     BackfillSchedule,
     DeleteSchedule,
+    AddSearchAttribute,
+    RemoveSearchAttribute,
+    SetDeploymentCurrent,
+    SetDeploymentRamp,
+    StartBatchOperation,
+    StopBatchOperation,
 }
 
 impl OperationKind {
@@ -729,6 +984,12 @@ impl OperationKind {
             Self::TriggerSchedule => "Schedule triggered",
             Self::BackfillSchedule => "Schedule backfill requested",
             Self::DeleteSchedule => "Schedule deleted",
+            Self::AddSearchAttribute => "Search Attribute registered",
+            Self::RemoveSearchAttribute => "Search Attribute removed",
+            Self::SetDeploymentCurrent => "Current Worker Deployment version updated",
+            Self::SetDeploymentRamp => "Worker Deployment ramp updated",
+            Self::StartBatchOperation => "Batch operation started",
+            Self::StopBatchOperation => "Batch operation stop requested",
         }
     }
 
@@ -743,6 +1004,18 @@ impl OperationKind {
                 | Self::BackfillSchedule
                 | Self::DeleteSchedule
         )
+    }
+
+    const fn is_search_attribute(self) -> bool {
+        matches!(self, Self::AddSearchAttribute | Self::RemoveSearchAttribute)
+    }
+
+    const fn is_deployment(self) -> bool {
+        matches!(self, Self::SetDeploymentCurrent | Self::SetDeploymentRamp)
+    }
+
+    const fn is_batch(self) -> bool {
+        matches!(self, Self::StartBatchOperation | Self::StopBatchOperation)
     }
 }
 
@@ -761,9 +1034,13 @@ pub struct App {
     pub auto_refresh: bool,
     pub color: bool,
     pub read_only: bool,
+    pub force_read_only: bool,
     pub codec_enabled: bool,
     pub web_ui_url: Option<String>,
     pub saved_queries: Vec<SavedQuery>,
+    pub profiles: Vec<ProfileSummary>,
+    pub switching_profile: bool,
+    pub pending_profile_name: Option<String>,
     pub view: View,
     pub cluster: Option<ClusterInfo>,
     pub namespaces: Vec<NamespaceSummary>,
@@ -800,6 +1077,16 @@ pub struct App {
     pub schedule_page_number: usize,
     pub schedule_has_previous_page: bool,
     pub schedule_has_next_page: bool,
+    pub batch_operations: Vec<BatchOperationSummary>,
+    pub selected_batch_operation: usize,
+    pub batch_operation_details: Option<BatchOperationDetails>,
+    pub batch_operations_error: Option<String>,
+    pub batch_page_number: usize,
+    pub batch_has_previous_page: bool,
+    pub batch_has_next_page: bool,
+    pub search_attributes: Vec<SearchAttributeSummary>,
+    pub search_attributes_error: Option<String>,
+    pub loading_search_attributes: bool,
     pub selected_event: usize,
     pub focus: Focus,
     pub overlay: Option<Overlay>,
@@ -815,9 +1102,14 @@ pub struct App {
     pub loading_worker_deployment_details: bool,
     pub loading_schedules: bool,
     pub loading_schedule_details: bool,
+    pub loading_batch_operations: bool,
+    pub loading_batch_operation_details: bool,
+    pub batch_preview_in_flight: bool,
     pub call_in_flight: bool,
     pub operation_in_flight: bool,
     pub should_quit: bool,
+    current_cluster_request: u64,
+    current_profile_request: u64,
     current_workflow_request: u64,
     current_count_request: u64,
     current_detail_request: u64,
@@ -830,6 +1122,10 @@ pub struct App {
     current_worker_deployment_details_request: u64,
     current_schedules_request: u64,
     current_schedule_details_request: u64,
+    current_search_attributes_request: u64,
+    current_batch_operations_request: u64,
+    current_batch_operation_details_request: u64,
+    current_batch_preview_request: u64,
     current_call_request: u64,
     current_namespace_request: u64,
     current_operation_request: u64,
@@ -847,6 +1143,9 @@ pub struct App {
     schedule_current_page_token: Vec<u8>,
     schedule_next_page_token: Vec<u8>,
     schedule_previous_page_tokens: Vec<Vec<u8>>,
+    batch_current_page_token: Vec<u8>,
+    batch_next_page_token: Vec<u8>,
+    batch_previous_page_tokens: Vec<Vec<u8>>,
     manual_task_queue_names: BTreeSet<String>,
     last_refresh_started: Instant,
 }
@@ -864,9 +1163,13 @@ impl App {
             auto_refresh: config.auto_refresh,
             color: config.color,
             read_only: config.read_only,
+            force_read_only: config.force_read_only,
             codec_enabled: config.codec_enabled,
             web_ui_url: config.web_ui_url,
             saved_queries: config.saved_queries,
+            profiles: config.profiles,
+            switching_profile: false,
+            pending_profile_name: None,
             view: View::Workflows,
             cluster: None,
             namespaces: Vec::new(),
@@ -903,6 +1206,16 @@ impl App {
             schedule_page_number: 1,
             schedule_has_previous_page: false,
             schedule_has_next_page: false,
+            batch_operations: Vec::new(),
+            selected_batch_operation: 0,
+            batch_operation_details: None,
+            batch_operations_error: None,
+            batch_page_number: 1,
+            batch_has_previous_page: false,
+            batch_has_next_page: false,
+            search_attributes: Vec::new(),
+            search_attributes_error: None,
+            loading_search_attributes: false,
             selected_event: 0,
             focus: Focus::Workflows,
             overlay: None,
@@ -918,9 +1231,14 @@ impl App {
             loading_worker_deployment_details: false,
             loading_schedules: false,
             loading_schedule_details: false,
+            loading_batch_operations: false,
+            loading_batch_operation_details: false,
+            batch_preview_in_flight: false,
             call_in_flight: false,
             operation_in_flight: false,
             should_quit: false,
+            current_cluster_request: 0,
+            current_profile_request: 0,
             current_workflow_request: 0,
             current_count_request: 0,
             current_detail_request: 0,
@@ -933,6 +1251,10 @@ impl App {
             current_worker_deployment_details_request: 0,
             current_schedules_request: 0,
             current_schedule_details_request: 0,
+            current_search_attributes_request: 0,
+            current_batch_operations_request: 0,
+            current_batch_operation_details_request: 0,
+            current_batch_preview_request: 0,
             current_call_request: 0,
             current_namespace_request: 0,
             current_operation_request: 0,
@@ -950,6 +1272,9 @@ impl App {
             schedule_current_page_token: Vec::new(),
             schedule_next_page_token: Vec::new(),
             schedule_previous_page_tokens: Vec::new(),
+            batch_current_page_token: Vec::new(),
+            batch_next_page_token: Vec::new(),
+            batch_previous_page_tokens: Vec::new(),
             manual_task_queue_names: BTreeSet::new(),
             last_refresh_started: Instant::now(),
         }
@@ -957,8 +1282,8 @@ impl App {
 
     /// Initial data fetches.
     pub fn bootstrap(&mut self) -> Vec<Command> {
-        let mut commands = vec![Command::LoadCluster, self.load_namespaces()];
-        commands.extend(self.refresh_workflows(true));
+        let mut commands = vec![self.load_cluster(), self.load_namespaces()];
+        commands.extend(self.refresh_current_view(true));
         commands
     }
 
@@ -966,6 +1291,12 @@ impl App {
     pub fn handle_key(&mut self, key: KeyEvent) -> Vec<Command> {
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
             self.should_quit = true;
+            return Vec::new();
+        }
+        if self.switching_profile {
+            if key.code == KeyCode::Char('q') {
+                self.should_quit = true;
+            }
             return Vec::new();
         }
         if self.overlay.is_some() {
@@ -977,12 +1308,43 @@ impl App {
     /// Apply a service response, dropping stale responses by request ID.
     pub fn handle_message(&mut self, message: Message) -> Vec<Command> {
         match message {
-            Message::ClusterLoaded(result) => {
+            Message::ClusterLoaded { request_id, result } => {
+                if request_id != self.current_cluster_request {
+                    return Vec::new();
+                }
                 match result {
                     Ok(cluster) => self.cluster = Some(cluster),
                     Err(error) => self.show_notice(error, NoticeKind::Error),
                 }
                 Vec::new()
+            }
+            Message::ProfileSwitchFinished { request_id, result } => {
+                if request_id != self.current_profile_request {
+                    return Vec::new();
+                }
+                self.switching_profile = false;
+                self.pending_profile_name = None;
+                match result {
+                    Ok(profile) => {
+                        self.invalidate_pending_requests();
+                        self.address = profile.address;
+                        self.profile_name = Some(profile.name.clone());
+                        self.namespace = profile.namespace;
+                        self.read_only = self.force_read_only || profile.read_only;
+                        self.codec_enabled = profile.codec_enabled;
+                        self.web_ui_url = profile.web_ui_url;
+                        self.clear_connected_state();
+                        self.show_notice(
+                            format!("Connected to profile/{}", profile.name),
+                            NoticeKind::Success,
+                        );
+                        self.bootstrap()
+                    }
+                    Err(error) => {
+                        self.show_notice(error, NoticeKind::Error);
+                        Vec::new()
+                    }
+                }
             }
             Message::NamespacesLoaded { request_id, result } => {
                 if request_id != self.current_namespace_request {
@@ -1271,6 +1633,92 @@ impl App {
                 }
                 Vec::new()
             }
+            Message::SearchAttributesLoaded { request_id, result } => {
+                if request_id != self.current_search_attributes_request {
+                    return Vec::new();
+                }
+                self.loading_search_attributes = false;
+                match result {
+                    Ok(attributes) => {
+                        self.search_attributes = attributes;
+                        self.search_attributes_error = None;
+                    }
+                    Err(error) => {
+                        self.search_attributes_error = Some(error.clone());
+                        self.show_notice(error, NoticeKind::Error);
+                    }
+                }
+                Vec::new()
+            }
+            Message::BatchOperationsLoaded { request_id, result } => {
+                if request_id != self.current_batch_operations_request {
+                    return Vec::new();
+                }
+                self.loading_batch_operations = false;
+                match result {
+                    Ok(page) => {
+                        let previous_job = self
+                            .batch_operations
+                            .get(self.selected_batch_operation)
+                            .map(|operation| operation.job_id.clone());
+                        self.batch_next_page_token = page.next_page_token;
+                        self.batch_has_previous_page = !self.batch_previous_page_tokens.is_empty();
+                        self.batch_has_next_page = !self.batch_next_page_token.is_empty();
+                        self.batch_page_number = self.batch_previous_page_tokens.len() + 1;
+                        self.batch_operations = page.operations;
+                        self.selected_batch_operation = previous_job
+                            .and_then(|job_id| {
+                                self.batch_operations
+                                    .iter()
+                                    .position(|operation| operation.job_id == job_id)
+                            })
+                            .unwrap_or(0)
+                            .min(self.batch_operations.len().saturating_sub(1));
+                        self.batch_operation_details = None;
+                        self.batch_operations_error = None;
+                        self.load_selected_batch_operation_details()
+                            .into_iter()
+                            .collect()
+                    }
+                    Err(error) => {
+                        self.batch_operations_error = Some(error.clone());
+                        self.show_notice(error, NoticeKind::Error);
+                        Vec::new()
+                    }
+                }
+            }
+            Message::BatchOperationDetailsLoaded { request_id, result } => {
+                if request_id != self.current_batch_operation_details_request {
+                    return Vec::new();
+                }
+                self.loading_batch_operation_details = false;
+                match result {
+                    Ok(details) => self.batch_operation_details = Some(*details),
+                    Err(error) => self.show_notice(error, NoticeKind::Error),
+                }
+                Vec::new()
+            }
+            Message::BatchOperationPreviewLoaded {
+                request_id,
+                form,
+                result,
+            } => {
+                if request_id != self.current_batch_preview_request {
+                    return Vec::new();
+                }
+                self.batch_preview_in_flight = false;
+                match result {
+                    Ok(matched_workflows) => {
+                        self.overlay = Some(Overlay::BatchConfirm {
+                            form,
+                            matched_workflows,
+                            input: TextInput::default(),
+                        });
+                    }
+                    Err(error) => self.show_notice(error, NoticeKind::Error),
+                }
+                Vec::new()
+            }
             Message::WorkflowCallFinished {
                 request_id,
                 kind,
@@ -1333,6 +1781,13 @@ impl App {
                         self.show_notice(operation.success_message(), NoticeKind::Success);
                         if operation.is_schedule() {
                             self.refresh_schedules(false)
+                        } else if operation.is_search_attribute() {
+                            self.overlay = Some(Overlay::SearchAttributes { selected: 0 });
+                            vec![self.load_search_attributes()]
+                        } else if operation.is_deployment() {
+                            self.refresh_worker_deployments(false)
+                        } else if operation.is_batch() {
+                            self.refresh_batch_operations(false)
                         } else {
                             self.refresh_workflows(false)
                         }
@@ -1376,6 +1831,9 @@ impl App {
         {
             self.notice = None;
         }
+        if self.switching_profile {
+            return Vec::new();
+        }
         if self.auto_refresh
             && !self.current_view_is_loading()
             && now.duration_since(self.last_refresh_started) >= self.refresh_interval
@@ -1398,6 +1856,23 @@ impl App {
             .unwrap_or(0)
     }
 
+    #[must_use]
+    pub fn selected_profile_index(&self) -> usize {
+        self.profile_name
+            .as_ref()
+            .and_then(|name| {
+                self.profiles
+                    .iter()
+                    .position(|profile| &profile.name == name)
+            })
+            .unwrap_or(0)
+    }
+
+    #[must_use]
+    pub(crate) fn expects_profile_switch(&self, request_id: u64) -> bool {
+        self.switching_profile && request_id == self.current_profile_request
+    }
+
     fn handle_dashboard_key(&mut self, key: KeyEvent) -> Vec<Command> {
         match key.code {
             KeyCode::Char('q') => self.should_quit = true,
@@ -1407,6 +1882,7 @@ impl App {
             KeyCode::Char('3') => return self.switch_view(View::Workers),
             KeyCode::Char('4') => return self.switch_view(View::Deployments),
             KeyCode::Char('5') => return self.switch_view(View::Schedules),
+            KeyCode::Char('6') => return self.switch_view(View::Batches),
             KeyCode::Char('/') if self.view == View::Workflows => {
                 self.overlay = Some(Overlay::Query(TextInput::new(self.query.clone())));
             }
@@ -1439,6 +1915,20 @@ impl App {
                     self.overlay = Some(Overlay::Aggregations { selected: 0 });
                 }
             }
+            KeyCode::Char('P') => {
+                if self.operation_in_flight || self.call_in_flight || self.batch_preview_in_flight {
+                    self.show_notice(
+                        "Wait for the active operation before switching profiles",
+                        NoticeKind::Info,
+                    );
+                } else if self.profiles.is_empty() {
+                    self.show_notice("No connection profiles configured", NoticeKind::Info);
+                } else {
+                    self.overlay = Some(Overlay::ProfilePicker {
+                        selected: self.selected_profile_index(),
+                    });
+                }
+            }
             KeyCode::Char('n') => {
                 if self.namespaces.is_empty() {
                     self.show_notice("No namespaces loaded", NoticeKind::Info);
@@ -1447,6 +1937,10 @@ impl App {
                         selected: self.selected_namespace_index(),
                     });
                 }
+            }
+            KeyCode::Char('A') => {
+                self.overlay = Some(Overlay::SearchAttributes { selected: 0 });
+                return vec![self.load_search_attributes()];
             }
             KeyCode::Char('r') => return self.refresh_current_view(false),
             KeyCode::Char('a') => {
@@ -1473,6 +1967,12 @@ impl App {
             }
             KeyCode::Char('p') if self.view == View::Workflows => self.open_pause_toggle(),
             KeyCode::Char('R') if self.view == View::Workflows => self.open_reset(),
+            KeyCode::Char('C') if self.view == View::Deployments => {
+                self.open_deployment_current();
+            }
+            KeyCode::Char('R') if self.view == View::Deployments => {
+                self.open_deployment_ramp();
+            }
             KeyCode::Char('N') if self.view == View::Schedules => self.open_schedule_create(),
             KeyCode::Char('E') if self.view == View::Schedules => self.open_schedule_edit(),
             KeyCode::Char('p') if self.view == View::Schedules => {
@@ -1485,6 +1985,8 @@ impl App {
             KeyCode::Char('d') if self.view == View::Schedules => {
                 self.open_schedule_confirmation(ScheduleConfirmAction::Delete);
             }
+            KeyCode::Char('N') if self.view == View::Batches => self.open_batch_create(),
+            KeyCode::Char('s') if self.view == View::Batches => self.open_batch_stop(),
             KeyCode::Char('[') => return self.previous_page(),
             KeyCode::Char(']') => return self.next_page(),
             KeyCode::Char('H') if self.view == View::Workflows => {
@@ -1605,6 +2107,44 @@ impl App {
                 }
                 _ => {}
             },
+            Overlay::ProfilePicker { selected } => match key.code {
+                KeyCode::Esc | KeyCode::Char('q' | 'P') => return Vec::new(),
+                KeyCode::Up | KeyCode::Char('k') => {
+                    *selected = selected.saturating_sub(1);
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    *selected = (*selected + 1).min(self.profiles.len().saturating_sub(1));
+                }
+                KeyCode::Home | KeyCode::Char('g') => *selected = 0,
+                KeyCode::End | KeyCode::Char('G') => {
+                    *selected = self.profiles.len().saturating_sub(1);
+                }
+                KeyCode::Enter => {
+                    let Some(profile) = self.profiles.get(*selected).cloned() else {
+                        return Vec::new();
+                    };
+                    if self.profile_name.as_deref() == Some(profile.name.as_str()) {
+                        self.show_notice(
+                            format!("Already connected to profile/{}", profile.name),
+                            NoticeKind::Info,
+                        );
+                        return Vec::new();
+                    }
+                    let request_id = self.next_request_id();
+                    self.current_profile_request = request_id;
+                    self.switching_profile = true;
+                    self.pending_profile_name = Some(profile.name.clone());
+                    self.show_notice(
+                        format!("Connecting to profile/{}…", profile.name),
+                        NoticeKind::Info,
+                    );
+                    return vec![Command::SwitchProfile {
+                        request_id,
+                        profile_name: profile.name,
+                    }];
+                }
+                _ => {}
+            },
             Overlay::NamespacePicker { selected } => match key.code {
                 KeyCode::Esc | KeyCode::Char('q') => return Vec::new(),
                 KeyCode::Up | KeyCode::Char('k') => {
@@ -1631,15 +2171,373 @@ impl App {
                         self.worker_deployment_details = None;
                         self.schedules.clear();
                         self.schedule_details = None;
+                        self.batch_operations.clear();
+                        self.batch_operation_details = None;
+                        self.search_attributes.clear();
+                        self.search_attributes_error = None;
                         self.manual_task_queue_names.clear();
                         self.reset_worker_pagination();
                         self.reset_deployment_pagination();
                         self.reset_schedule_pagination();
+                        self.reset_batch_pagination();
                         return self.refresh_current_view(true);
                     }
                     return Vec::new();
                 }
                 _ => {}
+            },
+            Overlay::SearchAttributes { selected } => match key.code {
+                KeyCode::Esc | KeyCode::Char('q' | 'A') => return Vec::new(),
+                KeyCode::Up | KeyCode::Char('k') => {
+                    *selected = selected.saturating_sub(1);
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    *selected = (*selected + 1).min(self.search_attributes.len().saturating_sub(1));
+                }
+                KeyCode::Home | KeyCode::Char('g') => *selected = 0,
+                KeyCode::End | KeyCode::Char('G') => {
+                    *selected = self.search_attributes.len().saturating_sub(1);
+                }
+                KeyCode::Char('r') => {
+                    self.overlay = Some(overlay);
+                    return vec![self.load_search_attributes()];
+                }
+                KeyCode::Char('a') => {
+                    if self.read_only {
+                        self.show_notice(
+                            "Search Attribute registration is blocked by read-only mode",
+                            NoticeKind::Error,
+                        );
+                    } else {
+                        self.overlay = Some(Overlay::SearchAttributeAdd(
+                            SearchAttributeAddForm::default(),
+                        ));
+                        return Vec::new();
+                    }
+                }
+                KeyCode::Char('d') => {
+                    if self.read_only {
+                        self.show_notice(
+                            "Search Attribute removal is blocked by read-only mode",
+                            NoticeKind::Error,
+                        );
+                    } else if let Some(attribute) = self.search_attributes.get(*selected) {
+                        if attribute.custom {
+                            self.overlay = Some(Overlay::SearchAttributeRemove {
+                                name: attribute.name.clone(),
+                                input: TextInput::default(),
+                            });
+                            return Vec::new();
+                        }
+                        self.show_notice(
+                            "System Search Attributes cannot be removed",
+                            NoticeKind::Info,
+                        );
+                    }
+                }
+                _ => {}
+            },
+            Overlay::SearchAttributeAdd(form) => match key.code {
+                KeyCode::Esc => {
+                    self.overlay = Some(Overlay::SearchAttributes { selected: 0 });
+                    return Vec::new();
+                }
+                KeyCode::Tab => {
+                    form.active_field =
+                        next_field(form.active_field, &SearchAttributeAddField::ALL);
+                }
+                KeyCode::BackTab => {
+                    form.active_field =
+                        previous_field(form.active_field, &SearchAttributeAddField::ALL);
+                }
+                KeyCode::Enter if form.active_field != SearchAttributeAddField::Confirmation => {
+                    form.active_field =
+                        next_field(form.active_field, &SearchAttributeAddField::ALL);
+                }
+                KeyCode::Enter => {
+                    let name = form.name.value.trim().to_string();
+                    if name.is_empty() {
+                        self.show_notice(
+                            "Search Attribute name must not be empty",
+                            NoticeKind::Error,
+                        );
+                        self.overlay = Some(overlay);
+                        return Vec::new();
+                    }
+                    if name.to_ascii_lowercase().starts_with("temporal") {
+                        self.show_notice(
+                            "Search Attribute names starting with Temporal are reserved by the \
+                             server",
+                            NoticeKind::Error,
+                        );
+                        self.overlay = Some(overlay);
+                        return Vec::new();
+                    }
+                    let Some(value_type) = canonical_search_attribute_type(&form.value_type.value)
+                    else {
+                        self.show_notice(
+                            "Type must be Text, Keyword, Int, Double, Bool, Datetime, or \
+                             KeywordList",
+                            NoticeKind::Error,
+                        );
+                        self.overlay = Some(overlay);
+                        return Vec::new();
+                    };
+                    if form.confirmation.value != name {
+                        self.show_notice(
+                            "Confirmation must exactly match the Search Attribute name",
+                            NoticeKind::Error,
+                        );
+                        self.overlay = Some(overlay);
+                        return Vec::new();
+                    }
+                    if self.operation_in_flight {
+                        self.overlay = Some(overlay);
+                        return Vec::new();
+                    }
+                    let request_id = self.next_request_id();
+                    self.current_operation_request = request_id;
+                    self.operation_in_flight = true;
+                    return vec![Command::AddSearchAttribute {
+                        request_id,
+                        namespace: self.namespace.clone(),
+                        name,
+                        value_type: value_type.to_string(),
+                    }];
+                }
+                _ => edit_search_attribute_add_field(form, key),
+            },
+            Overlay::SearchAttributeRemove { name, input } => match key.code {
+                KeyCode::Esc => {
+                    self.overlay = Some(Overlay::SearchAttributes { selected: 0 });
+                    return Vec::new();
+                }
+                KeyCode::Enter => {
+                    if input.value != *name {
+                        self.show_notice(
+                            "Confirmation must exactly match the Search Attribute name",
+                            NoticeKind::Error,
+                        );
+                        self.overlay = Some(overlay);
+                        return Vec::new();
+                    }
+                    if self.operation_in_flight {
+                        self.overlay = Some(overlay);
+                        return Vec::new();
+                    }
+                    let request_id = self.next_request_id();
+                    self.current_operation_request = request_id;
+                    self.operation_in_flight = true;
+                    return vec![Command::RemoveSearchAttribute {
+                        request_id,
+                        namespace: self.namespace.clone(),
+                        name: name.clone(),
+                    }];
+                }
+                _ => edit_text(input, key),
+            },
+            Overlay::DeploymentCurrent(form) => match key.code {
+                KeyCode::Esc => return Vec::new(),
+                KeyCode::Tab | KeyCode::BackTab => {
+                    form.active_field = match form.active_field {
+                        DeploymentCurrentField::BuildId => DeploymentCurrentField::Confirmation,
+                        DeploymentCurrentField::Confirmation => DeploymentCurrentField::BuildId,
+                    };
+                }
+                KeyCode::Enter if form.active_field == DeploymentCurrentField::BuildId => {
+                    form.active_field = DeploymentCurrentField::Confirmation;
+                }
+                KeyCode::Enter => {
+                    if form.confirmation.value != form.deployment_name {
+                        self.show_notice(
+                            "Confirmation must exactly match the Worker Deployment name",
+                            NoticeKind::Error,
+                        );
+                        self.overlay = Some(overlay);
+                        return Vec::new();
+                    }
+                    if self.operation_in_flight {
+                        self.overlay = Some(overlay);
+                        return Vec::new();
+                    }
+                    let request_id = self.next_request_id();
+                    self.current_operation_request = request_id;
+                    self.operation_in_flight = true;
+                    return vec![Command::SetDeploymentCurrent {
+                        request_id,
+                        namespace: self.namespace.clone(),
+                        deployment_name: form.deployment_name.clone(),
+                        build_id: form.build_id.value.trim().to_string(),
+                    }];
+                }
+                _ => match form.active_field {
+                    DeploymentCurrentField::BuildId => edit_text(&mut form.build_id, key),
+                    DeploymentCurrentField::Confirmation => {
+                        edit_text(&mut form.confirmation, key);
+                    }
+                },
+            },
+            Overlay::DeploymentRamp(form) => match key.code {
+                KeyCode::Esc => return Vec::new(),
+                KeyCode::Tab => {
+                    form.active_field = next_field(form.active_field, &DeploymentRampField::ALL);
+                }
+                KeyCode::BackTab => {
+                    form.active_field =
+                        previous_field(form.active_field, &DeploymentRampField::ALL);
+                }
+                KeyCode::Enter if form.active_field != DeploymentRampField::Confirmation => {
+                    form.active_field = next_field(form.active_field, &DeploymentRampField::ALL);
+                }
+                KeyCode::Enter => {
+                    let build_id = form.build_id.value.trim().to_string();
+                    let percentage = match form.percentage.value.trim().parse::<f32>() {
+                        Ok(percentage)
+                            if percentage.is_finite() && (0.0..=100.0).contains(&percentage) =>
+                        {
+                            percentage
+                        }
+                        _ => {
+                            self.show_notice(
+                                "Ramp percentage must be a number from 0 through 100",
+                                NoticeKind::Error,
+                            );
+                            self.overlay = Some(overlay);
+                            return Vec::new();
+                        }
+                    };
+                    if build_id.is_empty() && percentage != 0.0 {
+                        self.show_notice(
+                            "Clearing the ramping version requires a 0% ramp",
+                            NoticeKind::Error,
+                        );
+                        self.overlay = Some(overlay);
+                        return Vec::new();
+                    }
+                    if form.confirmation.value != form.deployment_name {
+                        self.show_notice(
+                            "Confirmation must exactly match the Worker Deployment name",
+                            NoticeKind::Error,
+                        );
+                        self.overlay = Some(overlay);
+                        return Vec::new();
+                    }
+                    if self.operation_in_flight {
+                        self.overlay = Some(overlay);
+                        return Vec::new();
+                    }
+                    let request_id = self.next_request_id();
+                    self.current_operation_request = request_id;
+                    self.operation_in_flight = true;
+                    return vec![Command::SetDeploymentRamp {
+                        request_id,
+                        namespace: self.namespace.clone(),
+                        deployment_name: form.deployment_name.clone(),
+                        build_id,
+                        percentage,
+                    }];
+                }
+                _ => edit_deployment_ramp_field(form, key),
+            },
+            Overlay::BatchCreate(form) => match key.code {
+                KeyCode::Esc => return Vec::new(),
+                KeyCode::Tab => {
+                    form.active_field = next_field(form.active_field, &BatchCreateField::ALL);
+                }
+                KeyCode::BackTab => {
+                    form.active_field = previous_field(form.active_field, &BatchCreateField::ALL);
+                }
+                KeyCode::Enter if form.active_field != BatchCreateField::SignalInput => {
+                    form.active_field = next_field(form.active_field, &BatchCreateField::ALL);
+                }
+                KeyCode::Enter => {
+                    let request = match batch_request_from_form(form) {
+                        Ok(request) => request,
+                        Err(error) => {
+                            self.show_notice(error, NoticeKind::Error);
+                            self.overlay = Some(overlay);
+                            return Vec::new();
+                        }
+                    };
+                    if self.batch_preview_in_flight {
+                        self.overlay = Some(overlay);
+                        return Vec::new();
+                    }
+                    let request_id = self.next_request_id();
+                    self.current_batch_preview_request = request_id;
+                    self.batch_preview_in_flight = true;
+                    return vec![Command::PreviewBatchOperation {
+                        request_id,
+                        namespace: self.namespace.clone(),
+                        form: form.clone(),
+                        request,
+                    }];
+                }
+                _ => edit_batch_create_field(form, key),
+            },
+            Overlay::BatchConfirm {
+                form,
+                matched_workflows: _,
+                input,
+            } => match key.code {
+                KeyCode::Esc => return Vec::new(),
+                KeyCode::Enter => {
+                    if input.value != form.job_id.value.trim() {
+                        self.show_notice(
+                            "Confirmation must exactly match the batch Job ID",
+                            NoticeKind::Error,
+                        );
+                        self.overlay = Some(overlay);
+                        return Vec::new();
+                    }
+                    let request = match batch_request_from_form(form) {
+                        Ok(request) => request,
+                        Err(error) => {
+                            self.show_notice(error, NoticeKind::Error);
+                            return Vec::new();
+                        }
+                    };
+                    if self.operation_in_flight {
+                        self.overlay = Some(overlay);
+                        return Vec::new();
+                    }
+                    let request_id = self.next_request_id();
+                    self.current_operation_request = request_id;
+                    self.operation_in_flight = true;
+                    return vec![Command::StartBatchOperation {
+                        request_id,
+                        namespace: self.namespace.clone(),
+                        request,
+                    }];
+                }
+                _ => edit_text(input, key),
+            },
+            Overlay::BatchStop { job_id, input } => match key.code {
+                KeyCode::Esc => return Vec::new(),
+                KeyCode::Enter => {
+                    if input.value != *job_id {
+                        self.show_notice(
+                            "Confirmation must exactly match the batch Job ID",
+                            NoticeKind::Error,
+                        );
+                        self.overlay = Some(overlay);
+                        return Vec::new();
+                    }
+                    if self.operation_in_flight {
+                        self.overlay = Some(overlay);
+                        return Vec::new();
+                    }
+                    let request_id = self.next_request_id();
+                    self.current_operation_request = request_id;
+                    self.operation_in_flight = true;
+                    return vec![Command::StopBatchOperation {
+                        request_id,
+                        namespace: self.namespace.clone(),
+                        job_id: job_id.clone(),
+                        reason: "Stopped from temporal-tui".to_string(),
+                    }];
+                }
+                _ => edit_text(input, key),
             },
             Overlay::Confirm {
                 action,
@@ -2116,6 +3014,10 @@ impl App {
                 let next = self.selected_schedule.saturating_sub(amount);
                 self.select_schedule(next)
             }
+            View::Batches => {
+                let next = self.selected_batch_operation.saturating_sub(amount);
+                self.select_batch_operation(next)
+            }
         }
     }
 
@@ -2156,6 +3058,11 @@ impl App {
                     (self.selected_schedule + amount).min(self.schedules.len().saturating_sub(1));
                 self.select_schedule(next)
             }
+            View::Batches => {
+                let next = (self.selected_batch_operation + amount)
+                    .min(self.batch_operations.len().saturating_sub(1));
+                self.select_batch_operation(next)
+            }
         }
     }
 
@@ -2175,6 +3082,7 @@ impl App {
             View::Workers => self.select_worker(0),
             View::Deployments => self.select_worker_deployment(0),
             View::Schedules => self.select_schedule(0),
+            View::Batches => self.select_batch_operation(0),
         }
     }
 
@@ -2199,6 +3107,9 @@ impl App {
                 self.select_worker_deployment(self.worker_deployments.len().saturating_sub(1))
             }
             View::Schedules => self.select_schedule(self.schedules.len().saturating_sub(1)),
+            View::Batches => {
+                self.select_batch_operation(self.batch_operations.len().saturating_sub(1))
+            }
         }
     }
 
@@ -2239,6 +3150,17 @@ impl App {
         self.selected_schedule = index;
         self.schedule_details = None;
         self.load_selected_schedule_details().into_iter().collect()
+    }
+
+    fn select_batch_operation(&mut self, index: usize) -> Vec<Command> {
+        if self.batch_operations.is_empty() || index == self.selected_batch_operation {
+            return Vec::new();
+        }
+        self.selected_batch_operation = index;
+        self.batch_operation_details = None;
+        self.load_selected_batch_operation_details()
+            .into_iter()
+            .collect()
     }
 
     fn open_confirmation(&mut self, action: ConfirmAction) {
@@ -2390,6 +3312,142 @@ impl App {
         }));
     }
 
+    fn open_deployment_current(&mut self) {
+        if self.read_only {
+            self.show_notice(
+                "Read-only mode blocks Worker Deployment changes",
+                NoticeKind::Info,
+            );
+            return;
+        }
+        if self.operation_in_flight {
+            self.show_notice(
+                "A control-plane operation is already in progress",
+                NoticeKind::Info,
+            );
+            return;
+        }
+        let Some(details) = &self.worker_deployment_details else {
+            self.show_notice("No Worker Deployment details loaded", NoticeKind::Info);
+            return;
+        };
+        let build_id = details
+            .summary
+            .ramping_version
+            .as_ref()
+            .or(details.summary.latest_version.as_ref())
+            .or(details.summary.current_version.as_ref())
+            .map(|version| version.build_id.clone())
+            .unwrap_or_default();
+        self.overlay = Some(Overlay::DeploymentCurrent(DeploymentCurrentForm {
+            deployment_name: details.summary.name.clone(),
+            build_id: TextInput::new(build_id),
+            confirmation: TextInput::default(),
+            active_field: DeploymentCurrentField::BuildId,
+        }));
+    }
+
+    fn open_deployment_ramp(&mut self) {
+        if self.read_only {
+            self.show_notice(
+                "Read-only mode blocks Worker Deployment changes",
+                NoticeKind::Info,
+            );
+            return;
+        }
+        if self.operation_in_flight {
+            self.show_notice(
+                "A control-plane operation is already in progress",
+                NoticeKind::Info,
+            );
+            return;
+        }
+        let Some(details) = &self.worker_deployment_details else {
+            self.show_notice("No Worker Deployment details loaded", NoticeKind::Info);
+            return;
+        };
+        let build_id = details
+            .summary
+            .ramping_version
+            .as_ref()
+            .or(details.summary.latest_version.as_ref())
+            .map(|version| version.build_id.clone())
+            .unwrap_or_default();
+        let percentage = if details.summary.ramping_version.is_some() {
+            details.summary.ramping_percentage
+        } else {
+            10.0
+        };
+        let percentage = if percentage.fract() == 0.0 {
+            format!("{percentage:.0}")
+        } else {
+            percentage.to_string()
+        };
+        self.overlay = Some(Overlay::DeploymentRamp(DeploymentRampForm {
+            deployment_name: details.summary.name.clone(),
+            build_id: TextInput::new(build_id),
+            percentage: TextInput::new(percentage),
+            confirmation: TextInput::default(),
+            active_field: DeploymentRampField::BuildId,
+        }));
+    }
+
+    fn open_batch_create(&mut self) {
+        if self.read_only {
+            self.show_notice("Read-only mode blocks batch operations", NoticeKind::Info);
+            return;
+        }
+        if self.operation_in_flight || self.batch_preview_in_flight {
+            self.show_notice(
+                "A control-plane operation is already in progress",
+                NoticeKind::Info,
+            );
+            return;
+        }
+        self.overlay = Some(Overlay::BatchCreate(BatchCreateForm {
+            job_id: TextInput::new(format!(
+                "temporal-tui-{}",
+                Utc::now().format("%Y%m%d-%H%M%S")
+            )),
+            operation: TextInput::new("cancel"),
+            visibility_query: TextInput::new(self.query.clone()),
+            reason: TextInput::new("Requested from temporal-tui"),
+            max_operations_per_second: TextInput::new("10"),
+            signal_name: TextInput::default(),
+            signal_input: TextInput::new("{}"),
+            active_field: BatchCreateField::JobId,
+        }));
+    }
+
+    fn open_batch_stop(&mut self) {
+        if self.read_only {
+            self.show_notice("Read-only mode blocks batch operations", NoticeKind::Info);
+            return;
+        }
+        if self.operation_in_flight {
+            self.show_notice(
+                "A control-plane operation is already in progress",
+                NoticeKind::Info,
+            );
+            return;
+        }
+        let Some(operation) = self.batch_operations.get(self.selected_batch_operation) else {
+            self.show_notice("No batch operation selected", NoticeKind::Info);
+            return;
+        };
+        if operation.state != "RUNNING" {
+            self.show_notice(
+                "Only a running batch operation can be stopped",
+                NoticeKind::Info,
+            );
+            return;
+        }
+        self.overlay = Some(Overlay::BatchStop {
+            job_id: operation.job_id.clone(),
+            input: TextInput::default(),
+        });
+    }
+
     fn open_schedule_create(&mut self) {
         if !self.schedule_mutation_available() {
             return;
@@ -2518,7 +3576,14 @@ impl App {
                 self.refresh_worker_deployments(true)
             }
             View::Schedules if self.schedules.is_empty() => self.refresh_schedules(true),
-            View::Workflows | View::Workers | View::Deployments | View::Schedules => Vec::new(),
+            View::Batches if self.batch_operations.is_empty() => {
+                self.refresh_batch_operations(true)
+            }
+            View::Workflows
+            | View::Workers
+            | View::Deployments
+            | View::Schedules
+            | View::Batches => Vec::new(),
         }
     }
 
@@ -2529,6 +3594,7 @@ impl App {
             View::Workers => self.refresh_workers(reset_pagination),
             View::Deployments => self.refresh_worker_deployments(reset_pagination),
             View::Schedules => self.refresh_schedules(reset_pagination),
+            View::Batches => self.refresh_batch_operations(reset_pagination),
         }
     }
 
@@ -2539,6 +3605,7 @@ impl App {
             View::Workers => self.loading_workers,
             View::Deployments => self.loading_worker_deployments,
             View::Schedules => self.loading_schedules,
+            View::Batches => self.loading_batch_operations,
         }
     }
 
@@ -2607,12 +3674,29 @@ impl App {
         }]
     }
 
+    fn refresh_batch_operations(&mut self, reset_pagination: bool) -> Vec<Command> {
+        if reset_pagination {
+            self.reset_batch_pagination();
+        }
+        let request_id = self.next_request_id();
+        self.current_batch_operations_request = request_id;
+        self.loading_batch_operations = true;
+        self.last_refresh_started = Instant::now();
+        vec![Command::LoadBatchOperations {
+            request_id,
+            namespace: self.namespace.clone(),
+            page_size: self.page_size,
+            next_page_token: self.batch_current_page_token.clone(),
+        }]
+    }
+
     fn next_page(&mut self) -> Vec<Command> {
         match self.view {
             View::Workflows => self.next_workflow_page(),
             View::Workers => self.next_worker_page(),
             View::Deployments => self.next_deployment_page(),
             View::Schedules => self.next_schedule_page(),
+            View::Batches => self.next_batch_page(),
             View::TaskQueues => {
                 self.show_notice("Task Queue diagnostics are not paginated", NoticeKind::Info);
                 Vec::new()
@@ -2626,6 +3710,7 @@ impl App {
             View::Workers => self.previous_worker_page(),
             View::Deployments => self.previous_deployment_page(),
             View::Schedules => self.previous_schedule_page(),
+            View::Batches => self.previous_batch_page(),
             View::TaskQueues => {
                 self.show_notice("Task Queue diagnostics are not paginated", NoticeKind::Info);
                 Vec::new()
@@ -2717,6 +3802,37 @@ impl App {
         self.refresh_schedules(false)
     }
 
+    fn next_batch_page(&mut self) -> Vec<Command> {
+        if self.loading_batch_operations {
+            self.show_notice("Batch operation page is still loading", NoticeKind::Info);
+            return Vec::new();
+        }
+        if self.batch_next_page_token.is_empty() {
+            self.show_notice("Already on the last Batch operation page", NoticeKind::Info);
+            return Vec::new();
+        }
+        self.batch_previous_page_tokens
+            .push(self.batch_current_page_token.clone());
+        self.batch_current_page_token = std::mem::take(&mut self.batch_next_page_token);
+        self.refresh_batch_operations(false)
+    }
+
+    fn previous_batch_page(&mut self) -> Vec<Command> {
+        if self.loading_batch_operations {
+            self.show_notice("Batch operation page is still loading", NoticeKind::Info);
+            return Vec::new();
+        }
+        let Some(previous) = self.batch_previous_page_tokens.pop() else {
+            self.show_notice(
+                "Already on the first Batch operation page",
+                NoticeKind::Info,
+            );
+            return Vec::new();
+        };
+        self.batch_current_page_token = previous;
+        self.refresh_batch_operations(false)
+    }
+
     fn reset_worker_pagination(&mut self) {
         self.worker_current_page_token.clear();
         self.worker_next_page_token.clear();
@@ -2742,6 +3858,15 @@ impl App {
         self.schedule_page_number = 1;
         self.schedule_has_previous_page = false;
         self.schedule_has_next_page = false;
+    }
+
+    fn reset_batch_pagination(&mut self) {
+        self.batch_current_page_token.clear();
+        self.batch_next_page_token.clear();
+        self.batch_previous_page_tokens.clear();
+        self.batch_page_number = 1;
+        self.batch_has_previous_page = false;
+        self.batch_has_next_page = false;
     }
 
     fn refresh_schedules(&mut self, reset_pagination: bool) -> Vec<Command> {
@@ -2980,10 +4105,131 @@ impl App {
         })
     }
 
+    fn load_selected_batch_operation_details(&mut self) -> Option<Command> {
+        let job_id = self
+            .batch_operations
+            .get(self.selected_batch_operation)?
+            .job_id
+            .clone();
+        let request_id = self.next_request_id();
+        self.current_batch_operation_details_request = request_id;
+        self.loading_batch_operation_details = true;
+        Some(Command::LoadBatchOperationDetails {
+            request_id,
+            namespace: self.namespace.clone(),
+            job_id,
+        })
+    }
+
+    fn load_cluster(&mut self) -> Command {
+        let request_id = self.next_request_id();
+        self.current_cluster_request = request_id;
+        Command::LoadCluster { request_id }
+    }
+
     fn load_namespaces(&mut self) -> Command {
         let request_id = self.next_request_id();
         self.current_namespace_request = request_id;
         Command::LoadNamespaces { request_id }
+    }
+
+    fn load_search_attributes(&mut self) -> Command {
+        let request_id = self.next_request_id();
+        self.current_search_attributes_request = request_id;
+        self.loading_search_attributes = true;
+        Command::LoadSearchAttributes {
+            request_id,
+            namespace: self.namespace.clone(),
+        }
+    }
+
+    fn invalidate_pending_requests(&mut self) {
+        let barrier = self.next_request_id();
+        self.current_cluster_request = barrier;
+        self.current_profile_request = barrier;
+        self.current_workflow_request = barrier;
+        self.current_count_request = barrier;
+        self.current_detail_request = barrier;
+        self.current_history_request = barrier;
+        self.current_chain_request = barrier;
+        self.current_task_queues_request = barrier;
+        self.current_workers_request = barrier;
+        self.current_worker_details_request = barrier;
+        self.current_worker_deployments_request = barrier;
+        self.current_worker_deployment_details_request = barrier;
+        self.current_schedules_request = barrier;
+        self.current_schedule_details_request = barrier;
+        self.current_search_attributes_request = barrier;
+        self.current_batch_operations_request = barrier;
+        self.current_batch_operation_details_request = barrier;
+        self.current_batch_preview_request = barrier;
+        self.current_call_request = barrier;
+        self.current_namespace_request = barrier;
+        self.current_operation_request = barrier;
+        self.current_utility_request = barrier;
+    }
+
+    fn clear_connected_state(&mut self) {
+        self.cluster = None;
+        self.namespaces.clear();
+        self.workflows.clear();
+        self.workflow_count = None;
+        self.details = None;
+        self.workflow_chain.clear();
+        self.task_queues.clear();
+        self.task_queues_error = None;
+        self.workers.clear();
+        self.worker_details = None;
+        self.workers_error = None;
+        self.worker_deployments.clear();
+        self.worker_deployment_details = None;
+        self.worker_deployments_error = None;
+        self.schedules.clear();
+        self.schedule_details = None;
+        self.schedules_error = None;
+        self.batch_operations.clear();
+        self.batch_operation_details = None;
+        self.batch_operations_error = None;
+        self.search_attributes.clear();
+        self.search_attributes_error = None;
+        self.selected_workflow = 0;
+        self.selected_event = 0;
+        self.selected_task_queue = 0;
+        self.selected_worker = 0;
+        self.selected_worker_deployment = 0;
+        self.selected_schedule = 0;
+        self.selected_batch_operation = 0;
+        self.focus = Focus::Workflows;
+        self.overlay = None;
+        self.loading_workflows = false;
+        self.loading_details = false;
+        self.loading_history_page = false;
+        self.loading_chain = false;
+        self.loading_task_queues = false;
+        self.loading_workers = false;
+        self.loading_worker_details = false;
+        self.loading_worker_deployments = false;
+        self.loading_worker_deployment_details = false;
+        self.loading_schedules = false;
+        self.loading_schedule_details = false;
+        self.loading_batch_operations = false;
+        self.loading_batch_operation_details = false;
+        self.loading_search_attributes = false;
+        self.batch_preview_in_flight = false;
+        self.call_in_flight = false;
+        self.operation_in_flight = false;
+        self.current_page_token.clear();
+        self.next_page_token.clear();
+        self.previous_page_tokens.clear();
+        self.page_number = 1;
+        self.has_previous_page = false;
+        self.has_next_page = false;
+        self.reset_worker_pagination();
+        self.reset_deployment_pagination();
+        self.reset_schedule_pagination();
+        self.reset_batch_pagination();
+        self.manual_task_queue_names.clear();
+        self.last_refresh_started = Instant::now();
     }
 
     fn next_request_id(&mut self) -> u64 {
@@ -3025,6 +4271,101 @@ fn parse_json_arguments(input: &str) -> Result<Vec<Value>, String> {
         ),
         Err(error) => Err(format!("invalid JSON: {error}")),
     }
+}
+
+fn canonical_search_attribute_type(value: &str) -> Option<&'static str> {
+    let normalized = value.trim().to_ascii_lowercase().replace(['_', '-'], "");
+    match normalized.as_str() {
+        "text" => Some("Text"),
+        "keyword" => Some("Keyword"),
+        "int" | "integer" => Some("Int"),
+        "double" | "float" => Some("Double"),
+        "bool" | "boolean" => Some("Bool"),
+        "datetime" | "timestamp" => Some("Datetime"),
+        "keywordlist" => Some("KeywordList"),
+        _ => None,
+    }
+}
+
+fn batch_request_from_form(form: &BatchCreateForm) -> Result<BatchOperationRequest, String> {
+    let job_id = form.job_id.value.trim().to_string();
+    if job_id.is_empty() {
+        return Err("Batch Job ID must not be empty".to_string());
+    }
+    let visibility_query = form.visibility_query.value.trim().to_string();
+    if visibility_query.is_empty() {
+        return Err("A non-empty Visibility query is required".to_string());
+    }
+    let reason = form.reason.value.trim().to_string();
+    if reason.is_empty() {
+        return Err("Batch reason must not be empty".to_string());
+    }
+    let kind = match form.operation.value.trim().to_ascii_lowercase().as_str() {
+        "cancel" => BatchOperationKind::Cancel,
+        "terminate" => BatchOperationKind::Terminate,
+        "signal" => BatchOperationKind::Signal,
+        "delete" => BatchOperationKind::Delete,
+        _ => return Err("Operation must be cancel, terminate, signal, or delete".to_string()),
+    };
+    let max_operations_per_second = form
+        .max_operations_per_second
+        .value
+        .trim()
+        .parse::<f32>()
+        .map_err(|_| "Maximum operations per second must be a number".to_string())?;
+    if !max_operations_per_second.is_finite() || max_operations_per_second < 0.0 {
+        return Err("Maximum operations per second must be zero or greater".to_string());
+    }
+    let signal_name = form.signal_name.value.trim().to_string();
+    if kind == BatchOperationKind::Signal && signal_name.is_empty() {
+        return Err("A signal batch requires a signal name".to_string());
+    }
+    let signal_input = if kind == BatchOperationKind::Signal {
+        serde_json::from_str::<Value>(&form.signal_input.value)
+            .map_err(|error| format!("Signal input is not valid JSON: {error}"))?
+    } else {
+        Value::Null
+    };
+    Ok(BatchOperationRequest {
+        job_id,
+        visibility_query,
+        reason,
+        max_operations_per_second,
+        kind,
+        signal_name,
+        signal_input,
+    })
+}
+
+fn edit_batch_create_field(form: &mut BatchCreateForm, key: KeyEvent) {
+    let input = match form.active_field {
+        BatchCreateField::JobId => &mut form.job_id,
+        BatchCreateField::Operation => &mut form.operation,
+        BatchCreateField::VisibilityQuery => &mut form.visibility_query,
+        BatchCreateField::Reason => &mut form.reason,
+        BatchCreateField::MaxOperationsPerSecond => &mut form.max_operations_per_second,
+        BatchCreateField::SignalName => &mut form.signal_name,
+        BatchCreateField::SignalInput => &mut form.signal_input,
+    };
+    edit_text(input, key);
+}
+
+fn edit_search_attribute_add_field(form: &mut SearchAttributeAddForm, key: KeyEvent) {
+    let input = match form.active_field {
+        SearchAttributeAddField::Name => &mut form.name,
+        SearchAttributeAddField::ValueType => &mut form.value_type,
+        SearchAttributeAddField::Confirmation => &mut form.confirmation,
+    };
+    edit_text(input, key);
+}
+
+fn edit_deployment_ramp_field(form: &mut DeploymentRampForm, key: KeyEvent) {
+    let input = match form.active_field {
+        DeploymentRampField::BuildId => &mut form.build_id,
+        DeploymentRampField::Percentage => &mut form.percentage,
+        DeploymentRampField::Confirmation => &mut form.confirmation,
+    };
+    edit_text(input, key);
 }
 
 fn edit_schedule_create_field(form: &mut ScheduleCreateForm, key: KeyEvent) {
@@ -3122,9 +4463,11 @@ mod tests {
             auto_refresh: true,
             color: true,
             read_only: false,
+            force_read_only: false,
             codec_enabled: false,
             web_ui_url: Some("http://localhost:8233".to_string()),
             saved_queries: Vec::new(),
+            profiles: Vec::new(),
         })
     }
 
@@ -3156,6 +4499,17 @@ mod tests {
         }
     }
 
+    fn profile(name: &str, address: &str, namespace: &str) -> ProfileSummary {
+        ProfileSummary {
+            name: name.to_string(),
+            address: address.to_string(),
+            namespace: namespace.to_string(),
+            read_only: false,
+            codec_enabled: false,
+            is_default: name == "dev",
+        }
+    }
+
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
     }
@@ -3170,7 +4524,7 @@ mod tests {
     #[test]
     fn bootstrap_requests_all_dashboard_data() {
         let commands = app().bootstrap();
-        assert!(matches!(commands[0], Command::LoadCluster));
+        assert!(matches!(commands[0], Command::LoadCluster { .. }));
         assert!(matches!(commands[1], Command::LoadNamespaces { .. }));
         assert!(matches!(commands[2], Command::LoadWorkflows { .. }));
         assert!(matches!(commands[3], Command::CountWorkflows { .. }));
@@ -3258,6 +4612,11 @@ mod tests {
         let commands = schedules.handle_key(key(KeyCode::Char('5')));
         assert_eq!(schedules.view, View::Schedules);
         assert!(matches!(commands[0], Command::LoadSchedules { .. }));
+
+        let mut batches = app();
+        let commands = batches.handle_key(key(KeyCode::Char('6')));
+        assert_eq!(batches.view, View::Batches);
+        assert!(matches!(commands[0], Command::LoadBatchOperations { .. }));
     }
 
     #[test]
@@ -3397,6 +4756,122 @@ mod tests {
     }
 
     #[test]
+    fn profile_switch_is_atomic_invalidates_old_results_and_refreshes_current_view() {
+        let mut app = app();
+        app.profile_name = Some("dev".to_string());
+        app.profiles = vec![
+            profile("dev", "dev.example:7233", "development"),
+            ProfileSummary {
+                read_only: true,
+                codec_enabled: true,
+                ..profile("prod", "prod.example:7233", "production")
+            },
+        ];
+        app.force_read_only = true;
+        app.view = View::Batches;
+        app.workflows = vec![workflow("old-cluster", WorkflowStatus::Running)];
+        app.batch_operations = vec![BatchOperationSummary {
+            job_id: "old-job".to_string(),
+            state: "RUNNING".to_string(),
+            start_time: None,
+            close_time: None,
+        }];
+        let bootstrap = app.bootstrap();
+        let Command::LoadCluster {
+            request_id: stale_cluster_request,
+        } = &bootstrap[0]
+        else {
+            panic!("expected cluster load");
+        };
+        let stale_cluster_request = *stale_cluster_request;
+
+        app.handle_key(key(KeyCode::Char('P')));
+        assert!(matches!(app.overlay, Some(Overlay::ProfilePicker { .. })));
+        app.handle_key(key(KeyCode::Down));
+        let switch = app.handle_key(key(KeyCode::Enter));
+        let Command::SwitchProfile {
+            request_id,
+            profile_name,
+        } = &switch[0]
+        else {
+            panic!("expected profile switch");
+        };
+        assert_eq!(profile_name, "prod");
+        assert!(app.switching_profile);
+        assert_eq!(app.pending_profile_name.as_deref(), Some("prod"));
+        assert!(app.handle_key(key(KeyCode::Char('N'))).is_empty());
+
+        let refresh = app.handle_message(Message::ProfileSwitchFinished {
+            request_id: *request_id,
+            result: Ok(ProfileConnectionInfo {
+                name: "prod".to_string(),
+                address: "prod.example:7233".to_string(),
+                namespace: "production".to_string(),
+                read_only: false,
+                codec_enabled: true,
+                web_ui_url: Some("https://temporal.example".to_string()),
+            }),
+        });
+        assert!(!app.switching_profile);
+        assert_eq!(app.profile_name.as_deref(), Some("prod"));
+        assert_eq!(app.address, "prod.example:7233");
+        assert_eq!(app.namespace, "production");
+        assert!(
+            app.read_only,
+            "global read-only must survive profile switches"
+        );
+        assert!(app.codec_enabled);
+        assert!(app.workflows.is_empty());
+        assert!(app.batch_operations.is_empty());
+        assert!(matches!(refresh[0], Command::LoadCluster { .. }));
+        assert!(matches!(refresh[1], Command::LoadNamespaces { .. }));
+        assert!(matches!(refresh[2], Command::LoadBatchOperations { .. }));
+
+        app.handle_message(Message::ClusterLoaded {
+            request_id: stale_cluster_request,
+            result: Ok(ClusterInfo {
+                cluster_name: "stale".to_string(),
+                ..ClusterInfo::default()
+            }),
+        });
+        assert!(
+            app.cluster.is_none(),
+            "old-cluster result must be discarded"
+        );
+    }
+
+    #[test]
+    fn failed_profile_switch_keeps_current_connection_state() {
+        let mut app = app();
+        app.profile_name = Some("dev".to_string());
+        app.address = "dev.example:7233".to_string();
+        app.namespace = "development".to_string();
+        app.profiles = vec![
+            profile("dev", "dev.example:7233", "development"),
+            profile("broken", "broken.example:7233", "production"),
+        ];
+        app.workflows = vec![workflow("dev-workflow", WorkflowStatus::Running)];
+
+        app.handle_key(key(KeyCode::Char('P')));
+        app.handle_key(key(KeyCode::Down));
+        let switch = app.handle_key(key(KeyCode::Enter));
+        let Command::SwitchProfile { request_id, .. } = &switch[0] else {
+            panic!("expected profile switch");
+        };
+        let commands = app.handle_message(Message::ProfileSwitchFinished {
+            request_id: *request_id,
+            result: Err("connection refused".to_string()),
+        });
+        assert!(commands.is_empty());
+        assert!(!app.switching_profile);
+        assert_eq!(app.profile_name.as_deref(), Some("dev"));
+        assert_eq!(app.address, "dev.example:7233");
+        assert_eq!(app.namespace, "development");
+        assert_eq!(app.workflows[0].key.workflow_id, "dev-workflow");
+        assert_eq!(app.notice.as_ref().unwrap().kind, NoticeKind::Error);
+    }
+
+    #[test]
     fn saved_query_picker_applies_query_and_resets_cursor() {
         let mut app = app();
         app.saved_queries = vec![SavedQuery {
@@ -3443,6 +4918,9 @@ mod tests {
         app.view = View::Schedules;
         app.schedules = vec![schedule("hourly-orders", false)];
         assert!(app.handle_key(key(KeyCode::Char('p'))).is_empty());
+        assert!(app.handle_key(key(KeyCode::Char('N'))).is_empty());
+        assert!(app.overlay.is_none());
+        app.view = View::Batches;
         assert!(app.handle_key(key(KeyCode::Char('N'))).is_empty());
         assert!(app.overlay.is_none());
         assert!(app.notice.is_some());
@@ -3571,6 +5049,206 @@ mod tests {
         );
         assert!(parse_json_arguments(r#"{"not":"an argument list"}"#).is_err());
         assert!(parse_json_arguments("[broken").is_err());
+    }
+
+    #[test]
+    fn search_attribute_registry_requires_type_and_exact_confirmation() {
+        let mut app = app();
+        let load = app.handle_key(key(KeyCode::Char('A')));
+        let Command::LoadSearchAttributes { request_id, .. } = &load[0] else {
+            panic!("expected Search Attribute load");
+        };
+        app.handle_message(Message::SearchAttributesLoaded {
+            request_id: *request_id,
+            result: Ok(vec![SearchAttributeSummary {
+                name: "CustomerTier".to_string(),
+                value_type: "KEYWORD".to_string(),
+                storage_type: "keyword".to_string(),
+                custom: true,
+            }]),
+        });
+        app.handle_key(key(KeyCode::Char('a')));
+        app.overlay = Some(Overlay::SearchAttributeAdd(SearchAttributeAddForm {
+            name: TextInput::new("Region"),
+            value_type: TextInput::new("Keyword"),
+            confirmation: TextInput::new("Region"),
+            active_field: SearchAttributeAddField::Confirmation,
+        }));
+        let command = app.handle_key(key(KeyCode::Enter));
+        assert!(matches!(
+            &command[0],
+            Command::AddSearchAttribute {
+                name,
+                value_type,
+                ..
+            } if name == "Region" && value_type == "Keyword"
+        ));
+    }
+
+    #[test]
+    fn deployment_rollout_forms_preserve_server_safety_checks() {
+        let mut app = app();
+        app.view = View::Deployments;
+        let version = crate::model::DeploymentVersion {
+            deployment_name: "payments".to_string(),
+            build_id: "v2".to_string(),
+        };
+        let summary = WorkerDeploymentSummary {
+            name: "payments".to_string(),
+            create_time: None,
+            current_version: None,
+            ramping_version: Some(version.clone()),
+            ramping_percentage: 25.0,
+            latest_version: Some(version.clone()),
+        };
+        app.worker_deployment_details = Some(WorkerDeploymentDetails {
+            summary,
+            versions: vec![crate::model::DeploymentVersionSummary {
+                version,
+                status: "RAMPING".to_string(),
+                create_time: None,
+                is_current: false,
+                is_ramping: true,
+                ramp_percentage: 25.0,
+                drainage_status: String::new(),
+                drainage_last_checked: None,
+            }],
+            manager_identity: String::new(),
+            last_modifier_identity: String::new(),
+            routing_update_state: "COMPLETED".to_string(),
+        });
+
+        app.handle_key(key(KeyCode::Char('C')));
+        app.overlay = Some(Overlay::DeploymentCurrent(DeploymentCurrentForm {
+            deployment_name: "payments".to_string(),
+            build_id: TextInput::new("v2"),
+            confirmation: TextInput::new("payments"),
+            active_field: DeploymentCurrentField::Confirmation,
+        }));
+        let command = app.handle_key(key(KeyCode::Enter));
+        assert!(matches!(
+            &command[0],
+            Command::SetDeploymentCurrent {
+                deployment_name,
+                build_id,
+                ..
+            } if deployment_name == "payments" && build_id == "v2"
+        ));
+
+        app.operation_in_flight = false;
+        app.overlay = Some(Overlay::DeploymentRamp(DeploymentRampForm {
+            deployment_name: "payments".to_string(),
+            build_id: TextInput::new("v2"),
+            percentage: TextInput::new("37.5"),
+            confirmation: TextInput::new("payments"),
+            active_field: DeploymentRampField::Confirmation,
+        }));
+        let command = app.handle_key(key(KeyCode::Enter));
+        assert!(matches!(
+            &command[0],
+            Command::SetDeploymentRamp { percentage, .. }
+                if (*percentage - 37.5).abs() < f32::EPSILON
+        ));
+    }
+
+    #[test]
+    fn batch_operation_preview_freezes_query_and_requires_exact_job_id() {
+        let mut app = app();
+        app.view = View::Batches;
+        let form = BatchCreateForm {
+            job_id: TextInput::new("cancel-stale-orders"),
+            operation: TextInput::new("cancel"),
+            visibility_query: TextInput::new(
+                "WorkflowType = 'OrderWorkflow' AND ExecutionStatus = 'Running'",
+            ),
+            reason: TextInput::new("stale order cleanup"),
+            max_operations_per_second: TextInput::new("12.5"),
+            signal_name: TextInput::default(),
+            signal_input: TextInput::new("not JSON, but irrelevant for cancellation"),
+            active_field: BatchCreateField::SignalInput,
+        };
+        app.overlay = Some(Overlay::BatchCreate(form.clone()));
+        let preview = app.handle_key(key(KeyCode::Enter));
+        let Command::PreviewBatchOperation {
+            request_id,
+            namespace,
+            form: frozen_form,
+            request,
+        } = &preview[0]
+        else {
+            panic!("expected Batch Operation preview");
+        };
+        assert_eq!(namespace, "default");
+        assert_eq!(frozen_form, &form);
+        assert_eq!(request.job_id, "cancel-stale-orders");
+        assert_eq!(
+            request.visibility_query,
+            "WorkflowType = 'OrderWorkflow' AND ExecutionStatus = 'Running'"
+        );
+        assert!((request.max_operations_per_second - 12.5).abs() < f32::EPSILON);
+        assert_eq!(request.signal_input, Value::Null);
+
+        app.handle_message(Message::BatchOperationPreviewLoaded {
+            request_id: *request_id,
+            form: frozen_form.clone(),
+            result: Ok(3),
+        });
+        let Some(Overlay::BatchConfirm {
+            matched_workflows,
+            input,
+            ..
+        }) = &mut app.overlay
+        else {
+            panic!("expected Batch Operation confirmation");
+        };
+        assert_eq!(*matched_workflows, 3);
+        *input = TextInput::new("cancel-stale-orders");
+        let start = app.handle_key(key(KeyCode::Enter));
+        assert!(matches!(
+            &start[0],
+            Command::StartBatchOperation {
+                namespace,
+                request,
+                ..
+            } if namespace == "default"
+                && request.job_id == "cancel-stale-orders"
+                && request.kind == BatchOperationKind::Cancel
+                && request.visibility_query
+                    == "WorkflowType = 'OrderWorkflow' AND ExecutionStatus = 'Running'"
+        ));
+    }
+
+    #[test]
+    fn running_batch_operation_stop_requires_exact_job_id() {
+        let mut app = app();
+        app.view = View::Batches;
+        app.batch_operations = vec![BatchOperationSummary {
+            job_id: "terminate-test-orders".to_string(),
+            state: "RUNNING".to_string(),
+            start_time: None,
+            close_time: None,
+        }];
+        app.handle_key(key(KeyCode::Char('s')));
+        assert!(matches!(app.overlay, Some(Overlay::BatchStop { .. })));
+
+        if let Some(Overlay::BatchStop { input, .. }) = &mut app.overlay {
+            *input = TextInput::new("wrong-job");
+        }
+        assert!(app.handle_key(key(KeyCode::Enter)).is_empty());
+        assert!(matches!(app.overlay, Some(Overlay::BatchStop { .. })));
+
+        if let Some(Overlay::BatchStop { input, .. }) = &mut app.overlay {
+            *input = TextInput::new("terminate-test-orders");
+        }
+        let stop = app.handle_key(key(KeyCode::Enter));
+        assert!(matches!(
+            &stop[0],
+            Command::StopBatchOperation {
+                namespace,
+                job_id,
+                ..
+            } if namespace == "default" && job_id == "terminate-test-orders"
+        ));
     }
 
     #[test]

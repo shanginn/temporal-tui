@@ -20,6 +20,9 @@ required at runtime.
   utilization, task outcomes, sticky-cache health, SDK version, and plugins.
 - Inspect GA Worker Deployments, traffic ramping, routing propagation, and
   per-version drainage state without using the removed legacy Versioning APIs.
+- Promote a tracked Worker Deployment build to Current, configure or clear a
+  Ramping build and percentage, and retain Temporal's missing-queue/no-poller
+  protections.
 - Invoke Workflow Query and Update handlers with zero or more JSON arguments,
   decode their results, and display complete Update failures.
 - Pause or unpause a running Workflow and reset it at an explicit history-event
@@ -30,8 +33,16 @@ required at runtime.
 - Create, update, pause, unpause, trigger, backfill, and delete Schedules.
   Schedule updates use the current conflict token and preserve fields the form
   does not change.
+- Inspect the namespace Search Attribute registry and add or remove custom
+  attributes with an explicit type and exact-name confirmation.
+- Preview a frozen non-empty Visibility query, then start, inspect, paginate,
+  or stop a Temporal server-side cancel, terminate, signal, or delete Batch
+  Operation. Targets are never expanded into per-Workflow client calls.
 - Refresh manually or automatically.
-- Use named connection profiles and saved visibility queries.
+- Use named connection profiles and saved visibility queries. Switch profiles
+  inside the TUI with `P`; the target connection is verified before the current
+  service is replaced, and stale responses from the previous cluster are
+  discarded.
 - Store API keys in macOS Keychain, Windows Credential Manager, Linux Secret
   Service, or resolve them from an environment variable. Secret material is
   never written to the profile file.
@@ -51,8 +62,9 @@ required at runtime.
 
 Cancellation and termination require typing the exact Workflow ID and are
 unavailable in read-only mode.
-Reset, Schedule trigger, backfill, and deletion also require typing the exact
-target ID. All mutations are unavailable in read-only mode.
+Reset, Schedule trigger, backfill, deletion, Search Attribute changes, rollout
+changes, and Batch Operations also require an exact target confirmation where
+applicable. All mutations are unavailable in read-only mode.
 Mutation commands retain both the workflow ID and run ID selected when the
 confirmation opened, so a refresh cannot redirect an action to a different run.
 
@@ -139,6 +151,11 @@ temporal-tui --profile cloud
 operating-system credential manager. For headless environments, use
 `profile create ... --api-key-env TEMPORAL_API_KEY`.
 
+Press `P` from the dashboard to switch among configured profiles without
+restarting. Profile rows contain only non-secret address, namespace, mode, and
+Codec Server status. Secret references are resolved only after selection. A
+failed reconnect leaves the current connection and dashboard state unchanged.
+
 Save reusable Visibility queries without hand-editing TOML:
 
 ```sh
@@ -167,7 +184,7 @@ profile or diagnostic exports.
 
 | Key | Action |
 | --- | --- |
-| `1` / `2` / `3` / `4` / `5` | Workflows / Task Queues / Workers / Deployments / Schedules |
+| `1` / `2` / `3` / `4` / `5` / `6` | Workflows / Task Queues / Workers / Deployments / Schedules / Batch Operations |
 | `j` / `k`, arrows | Move through the active list or Workflow history |
 | `g` / `G`, home / end | Jump to first or last item |
 | `tab` / `enter` | Switch between Workflow and history panes |
@@ -175,6 +192,8 @@ profile or diagnostic exports.
 | `f` | Select a saved visibility query |
 | `#` | Show `GROUP BY` counts |
 | `n` | Switch namespace |
+| `P` | Switch configured connection profile |
+| `A` | Inspect and manage namespace Search Attributes |
 | `[` / `]` | Previous / next page in the active paginated view |
 | `r` | Refresh now |
 | `a` | Toggle automatic refresh |
@@ -187,10 +206,12 @@ profile or diagnostic exports.
 | `Q` / `U` | Invoke a Query / Update with a JSON argument array |
 | `p` | Pause or unpause the selected Workflow or Schedule |
 | `R` | Reset a Workflow at a history event (exact-ID confirmation) |
+| `C` / `R` on Deployments | Set Current / configure Ramping build |
 | `c` | Request workflow cancellation |
 | `x` | Terminate a workflow |
 | `N` / `E` | Create / edit a Schedule |
 | `t` / `b` / `d` | Trigger / backfill / delete a Schedule |
+| `N` / `s` on Batches | Preview and start / stop a server-side Batch Operation |
 | `?` | Open keyboard help |
 | `q` / `ctrl-c` | Quit |
 
@@ -207,7 +228,9 @@ cluster discovery, namespaces, visibility cursors and counts, complete history
 pagination, Task Queue backlog, Worker and Worker Deployment endpoints, payload
 redaction, an encode/decode Codec Server round trip, Workflow chains, signal,
 cancel, terminate, Query, Update, Workflow pause/reset, and the complete
-Schedule lifecycle through the real gRPC adapter and a real Rust SDK Worker:
+Schedule lifecycle, Search Attribute registration, Worker Deployment rollout,
+and server-side Batch Operation lifecycle through the real gRPC adapter and a
+real Rust SDK Worker:
 
 ```sh
 scripts/install-temporal-cli.sh
@@ -221,9 +244,12 @@ published SHA-256 checksum, and does not modify the system installation.
 
 The application state machine is pure: keyboard events and async responses
 produce typed commands, while the Tokio runtime executes those commands through
-a small `TemporalService` boundary. Request IDs suppress stale list, detail, and
-mutation responses. Ratatui `TestBackend` tests cover the dashboard, confirmation
-modal, and small-terminal fallback without requiring a real terminal.
+a small `TemporalService` boundary. Request IDs suppress stale list, detail,
+mutation, and cross-cluster responses. Profile switching resolves secret
+references lazily and swaps the active service only after the new Temporal
+frontend responds successfully. Ratatui `TestBackend` tests cover the dashboard,
+confirmation modals, profile switcher, and small-terminal fallback without
+requiring a real terminal.
 
 The Worker list/detail surface uses Temporal's experimental heartbeat API and
 is shown as unavailable rather than guessed when a server or SDK does not
