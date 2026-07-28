@@ -2434,10 +2434,13 @@ mod tests {
                     match listener.accept() {
                         Ok((mut stream, _)) => {
                             stream.set_nonblocking(false).unwrap();
+                            stream
+                                .set_write_timeout(Some(Duration::from_secs(1)))
+                                .unwrap();
                             let request = read_request(&mut stream, &origin);
                             requests_in_thread.fetch_add(1, Ordering::SeqCst);
                             let response = handler(request);
-                            write_response(&mut stream, &response);
+                            let _ = write_response(&mut stream, &response);
                         }
                         Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                             thread::sleep(Duration::from_millis(2));
@@ -2511,7 +2514,10 @@ mod tests {
         }
     }
 
-    fn write_response(stream: &mut std::net::TcpStream, response: &TestResponse) {
+    fn write_response(
+        stream: &mut std::net::TcpStream,
+        response: &TestResponse,
+    ) -> std::io::Result<()> {
         let reason = match response.status {
             200 => "OK",
             401 => "Unauthorized",
@@ -2526,9 +2532,9 @@ mod tests {
             response.content_type,
             response.body.len()
         );
-        stream.write_all(headers.as_bytes()).unwrap();
-        stream.write_all(&response.body).unwrap();
-        stream.flush().unwrap();
+        stream.write_all(headers.as_bytes())?;
+        stream.write_all(&response.body)?;
+        stream.flush()
     }
 
     #[test]
