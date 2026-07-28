@@ -9,7 +9,8 @@
   "architecture": {
     "64bit": {
       "url": "@REPOSITORY@/releases/download/v@VERSION@/@WINDOWS_ARCHIVE@",
-      "hash": "@WINDOWS_SHA@"
+      "hash": "@WINDOWS_SHA@",
+      "extract_dir": "temporal-tui-v@VERSION@-x86_64-pc-windows-msvc"
     }
   },
   "bin": "temporal-tui.exe",
@@ -19,7 +20,8 @@
   "autoupdate": {
     "architecture": {
       "64bit": {
-        "url": "@REPOSITORY@/releases/download/v$version/temporal-tui-v$version-x86_64-pc-windows-msvc.zip"
+        "url": "@REPOSITORY@/releases/download/v$version/temporal-tui-v$version-x86_64-pc-windows-msvc.zip",
+        "extract_dir": "temporal-tui-v$version-x86_64-pc-windows-msvc"
       }
     }
   }
