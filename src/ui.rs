@@ -12,12 +12,14 @@ use ratatui::{
 use unicode_width::UnicodeWidthStr;
 
 use crate::{
-    app::{App, ConfirmAction, Focus, NoticeKind, Overlay, SignalField, SignalForm, TextInput},
+    app::{
+        App, ConfirmAction, Focus, NoticeKind, Overlay, SignalField, SignalForm, TextInput, View,
+    },
     model::{FailureSummary, StructuredField, WorkflowStatus},
 };
 
 const MIN_WIDTH: u16 = 58;
-const MIN_HEIGHT: u16 = 15;
+const MIN_HEIGHT: u16 = 16;
 
 /// Draw the complete dashboard.
 pub fn render(frame: &mut Frame<'_>, app: &App) {
@@ -29,7 +31,7 @@ pub fn render(frame: &mut Frame<'_>, app: &App) {
 
     let theme = Theme::new(app.color);
     let vertical = Layout::vertical([
-        Constraint::Length(3),
+        Constraint::Length(4),
         Constraint::Min(8),
         Constraint::Length(1),
     ])
@@ -42,6 +44,7 @@ pub fn render(frame: &mut Frame<'_>, app: &App) {
         match overlay {
             Overlay::Help => render_help(frame, area, theme),
             Overlay::Query(input) => render_query(frame, area, input, theme),
+            Overlay::TaskQueue(input) => render_task_queue_input(frame, area, input, theme),
             Overlay::SavedQueryPicker { selected } => {
                 render_saved_queries(frame, area, app, *selected, theme);
             }
@@ -90,7 +93,29 @@ fn render_header(frame: &mut Frame<'_>, app: &App, area: Rect, theme: Theme) {
     } else {
         format!("query: {}", app.query)
     };
-    let line = Line::from(vec![
+    let tabs = [
+        View::Workflows,
+        View::TaskQueues,
+        View::Workers,
+        View::Deployments,
+    ]
+    .into_iter()
+    .flat_map(|view| {
+        let active = app.view == view;
+        [
+            Span::styled(
+                format!(" {} {} ", view.number(), view.label()),
+                if active {
+                    theme.selection()
+                } else {
+                    theme.key()
+                },
+            ),
+            Span::raw(" "),
+        ]
+    })
+    .collect::<Vec<_>>();
+    let status = Line::from(vec![
         Span::styled(" ● ", theme.success()),
         Span::styled(cluster, theme.strong()),
         Span::raw("  "),
@@ -111,6 +136,19 @@ fn render_header(frame: &mut Frame<'_>, app: &App, area: Rect, theme: Theme) {
             },
         ),
         Span::raw("  "),
+        Span::styled(
+            if app.codec_enabled {
+                "CODEC ON"
+            } else {
+                "CODEC OFF"
+            },
+            if app.codec_enabled {
+                theme.accent()
+            } else {
+                theme.muted()
+            },
+        ),
+        Span::raw("  "),
         Span::styled(query, theme.muted()),
     ]);
     let block = Block::default()
@@ -128,10 +166,22 @@ fn render_header(frame: &mut Frame<'_>, app: &App, area: Rect, theme: Theme) {
             .alignment(Alignment::Right)
             .style(theme.muted()),
         );
-    frame.render_widget(Paragraph::new(line).block(block), area);
+    frame.render_widget(
+        Paragraph::new(Text::from(vec![Line::from(tabs), status])).block(block),
+        area,
+    );
 }
 
 fn render_dashboard(frame: &mut Frame<'_>, app: &App, area: Rect, theme: Theme) {
+    match app.view {
+        View::Workflows => render_workflow_dashboard(frame, app, area, theme),
+        View::TaskQueues => render_task_queue_dashboard(frame, app, area, theme),
+        View::Workers => render_worker_dashboard(frame, app, area, theme),
+        View::Deployments => render_deployment_dashboard(frame, app, area, theme),
+    }
+}
+
+fn render_workflow_dashboard(frame: &mut Frame<'_>, app: &App, area: Rect, theme: Theme) {
     if area.width >= 106 {
         let horizontal =
             Layout::horizontal([Constraint::Percentage(58), Constraint::Percentage(42)])
@@ -143,6 +193,505 @@ fn render_dashboard(frame: &mut Frame<'_>, app: &App, area: Rect, theme: Theme) 
             Layout::vertical([Constraint::Percentage(54), Constraint::Percentage(46)]).split(area);
         render_workflows(frame, app, vertical[0], theme);
         render_details(frame, app, vertical[1], theme);
+    }
+}
+
+fn master_detail_areas(area: Rect) -> [Rect; 2] {
+    let areas = if area.width >= 106 {
+        Layout::horizontal([Constraint::Percentage(58), Constraint::Percentage(42)]).split(area)
+    } else {
+        Layout::vertical([Constraint::Percentage(54), Constraint::Percentage(46)]).split(area)
+    };
+    [areas[0], areas[1]]
+}
+
+fn render_task_queue_dashboard(frame: &mut Frame<'_>, app: &App, area: Rect, theme: Theme) {
+    let [list_area, detail_area] = master_detail_areas(area);
+    let title = if app.loading_task_queues {
+        format!(" Task Queues ({}) ⟳ ", app.task_queues.len())
+    } else {
+        format!(" Task Queues ({}) ", app.task_queues.len())
+    };
+    let rows = app.task_queues.iter().map(|queue| {
+        let health = task_queue_health(queue, theme);
+        Row::new(vec![
+            Cell::from(health.0).style(health.1),
+            Cell::from(queue.queue_type.label()),
+            Cell::from(queue.name.clone()),
+            Cell::from(queue.stats.approximate_backlog_count.to_string()),
+            Cell::from(format_duration_seconds(
+                queue.stats.approximate_backlog_age_seconds,
+            )),
+            Cell::from(queue.pollers.len().to_string()),
+        ])
+    });
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Length(9),
+            Constraint::Length(10),
+            Constraint::Fill(2),
+            Constraint::Length(9),
+            Constraint::Length(10),
+            Constraint::Length(8),
+        ],
+    )
+    .header(
+        Row::new([
+            "HEALTH",
+            "TYPE",
+            "TASK QUEUE",
+            "BACKLOG",
+            "OLDEST",
+            "POLLERS",
+        ])
+        .style(theme.table_header()),
+    )
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(theme.accent())
+            .title(Span::styled(title, theme.title())),
+    )
+    .row_highlight_style(theme.selection())
+    .highlight_symbol("› ");
+    let mut state = TableState::default()
+        .with_selected((!app.task_queues.is_empty()).then_some(app.selected_task_queue));
+    frame.render_stateful_widget(table, list_area, &mut state);
+
+    let Some(queue) = app.task_queues.get(app.selected_task_queue) else {
+        render_empty_panel(
+            frame,
+            detail_area,
+            " Task Queue diagnostics ",
+            app.task_queues_error
+                .as_deref()
+                .unwrap_or("No Task Queues discovered from Workflows or Workers"),
+            theme,
+        );
+        return;
+    };
+    let health = task_queue_health(queue, theme);
+    let current = queue.current_deployment.as_ref().map_or_else(
+        || "unversioned".to_string(),
+        crate::model::DeploymentVersion::label,
+    );
+    let ramping = queue.ramping_deployment.as_ref().map_or_else(
+        || "none".to_string(),
+        |version| format!("{} @ {:.1}%", version.label(), queue.ramping_percentage),
+    );
+    let mut lines = vec![
+        Line::from(vec![
+            Span::styled("Health      ", theme.muted()),
+            Span::styled(health.0, health.1),
+        ]),
+        inspector_value("Queue", &queue.name, theme),
+        inspector_value("Type", queue.queue_type.label(), theme),
+        inspector_value(
+            "Backlog",
+            &format!(
+                "{} · oldest {}",
+                queue.stats.approximate_backlog_count,
+                format_duration_seconds(queue.stats.approximate_backlog_age_seconds)
+            ),
+            theme,
+        ),
+        inspector_value(
+            "Rates",
+            &format!(
+                "{:.2}/s added · {:.2}/s dispatched",
+                queue.stats.tasks_add_rate, queue.stats.tasks_dispatch_rate
+            ),
+            theme,
+        ),
+        inspector_value("Current", &current, theme),
+        inspector_value("Ramping", &ramping, theme),
+    ];
+    if let Some(limit) = queue.effective_rate_limit {
+        lines.push(inspector_value(
+            "Rate limit",
+            &format!("{limit:.2}/s"),
+            theme,
+        ));
+    }
+    lines.push(Line::default());
+    lines.push(inspector_section("POLLERS", theme));
+    if queue.pollers.is_empty() {
+        lines.push(Line::from("No pollers reported").style(theme.warning()));
+    } else {
+        for poller in &queue.pollers {
+            let deployment = if poller.deployment_name.is_empty() {
+                "unversioned".to_string()
+            } else {
+                format!("{}:{}", poller.deployment_name, poller.build_id)
+            };
+            lines.push(Line::from(vec![
+                Span::styled(poller.identity.clone(), theme.strong()),
+                Span::raw(format!(
+                    " · {} · {:.2}/s · {}",
+                    format_time(poller.last_access_time.as_ref()),
+                    poller.rate_per_second,
+                    deployment
+                )),
+            ]));
+        }
+    }
+    frame.render_widget(
+        Paragraph::new(Text::from(lines))
+            .wrap(Wrap { trim: false })
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(theme.border(false))
+                    .title(Span::styled(" Task Queue diagnostics ", theme.title()))
+                    .padding(Padding::horizontal(1)),
+            ),
+        detail_area,
+    );
+}
+
+fn task_queue_health(
+    queue: &crate::model::TaskQueueSummary,
+    theme: Theme,
+) -> (&'static str, Style) {
+    if queue.pollers.is_empty() && queue.stats.approximate_backlog_count > 0 {
+        ("STALLED", theme.error())
+    } else if queue.stats.approximate_backlog_count > 0
+        && queue.stats.tasks_add_rate > queue.stats.tasks_dispatch_rate
+    {
+        ("GROWING", theme.warning())
+    } else if queue.pollers.is_empty() {
+        ("IDLE", theme.muted())
+    } else {
+        ("HEALTHY", theme.success())
+    }
+}
+
+fn render_worker_dashboard(frame: &mut Frame<'_>, app: &App, area: Rect, theme: Theme) {
+    let [list_area, detail_area] = master_detail_areas(area);
+    let title = if app.loading_workers {
+        format!(
+            " Workers ({}) · page {} ⟳ ",
+            app.workers.len(),
+            app.worker_page_number
+        )
+    } else {
+        format!(
+            " Workers ({}) · page {} ",
+            app.workers.len(),
+            app.worker_page_number
+        )
+    };
+    let rows = app.workers.iter().map(|worker| {
+        Row::new(vec![
+            Cell::from(worker.status.clone()).style(worker_status_style(&worker.status, theme)),
+            Cell::from(worker.identity.clone()),
+            Cell::from(worker.task_queue.clone()),
+            Cell::from(format!("{} {}", worker.sdk_name, worker.sdk_version)),
+            Cell::from(worker.deployment.as_ref().map_or_else(
+                || "unversioned".to_string(),
+                crate::model::DeploymentVersion::label,
+            )),
+        ])
+    });
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Length(10),
+            Constraint::Fill(2),
+            Constraint::Fill(2),
+            Constraint::Length(18),
+            Constraint::Fill(2),
+        ],
+    )
+    .header(
+        Row::new(["STATUS", "IDENTITY", "TASK QUEUE", "SDK", "DEPLOYMENT"])
+            .style(theme.table_header()),
+    )
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(theme.accent())
+            .title(Span::styled(title, theme.title())),
+    )
+    .row_highlight_style(theme.selection())
+    .highlight_symbol("› ");
+    let mut state = TableState::default()
+        .with_selected((!app.workers.is_empty()).then_some(app.selected_worker));
+    frame.render_stateful_widget(table, list_area, &mut state);
+
+    let Some(details) = &app.worker_details else {
+        render_empty_panel(
+            frame,
+            detail_area,
+            " Worker diagnostics ",
+            app.workers_error
+                .as_deref()
+                .unwrap_or(if app.loading_worker_details {
+                    "Loading Worker heartbeat diagnostics…"
+                } else {
+                    "No heartbeat-enabled Workers reported"
+                }),
+            theme,
+        );
+        return;
+    };
+    let worker = &details.summary;
+    let mut lines = vec![
+        inspector_value("Instance", &worker.instance_key, theme),
+        inspector_value("Identity", &worker.identity, theme),
+        inspector_value(
+            "Host",
+            &format!("{} pid {}", worker.host_name, worker.process_id),
+            theme,
+        ),
+        inspector_value("Task queue", &worker.task_queue, theme),
+        inspector_value(
+            "SDK",
+            &format!("{} {}", worker.sdk_name, worker.sdk_version),
+            theme,
+        ),
+        inspector_value(
+            "Heartbeat",
+            &format!(
+                "{} · {:.1}s ago",
+                format_time(details.heartbeat_time.as_ref()),
+                details.elapsed_since_heartbeat_seconds
+            ),
+            theme,
+        ),
+        inspector_value(
+            "Host usage",
+            &format!(
+                "CPU {:.1}% · memory {:.1}%",
+                details.host_cpu_usage * 100.0,
+                details.host_memory_usage * 100.0
+            ),
+            theme,
+        ),
+        inspector_value(
+            "Pollers",
+            &format!(
+                "{} workflow · {} activity · {} nexus",
+                details.workflow_pollers, details.activity_pollers, details.nexus_pollers
+            ),
+            theme,
+        ),
+        inspector_value(
+            "Sticky cache",
+            &format!(
+                "{} entries · {} hits · {} misses",
+                details.sticky_cache_size, details.sticky_cache_hits, details.sticky_cache_misses
+            ),
+            theme,
+        ),
+        Line::default(),
+        inspector_section("SLOTS", theme),
+    ];
+    for (label, slots) in [
+        ("Workflow", &details.workflow_slots),
+        ("Activity", &details.activity_slots),
+        ("Local activity", &details.local_activity_slots),
+        ("Nexus", &details.nexus_slots),
+    ] {
+        lines.push(Line::from(format!(
+            "{label:<16} used {} · available {} · processed {} · failed {} · {}",
+            slots.used, slots.available, slots.processed, slots.failed, slots.supplier
+        )));
+    }
+    if !worker.plugins.is_empty() {
+        lines.push(Line::default());
+        lines.push(inspector_value(
+            "Plugins",
+            &worker.plugins.join(", "),
+            theme,
+        ));
+    }
+    frame.render_widget(
+        Paragraph::new(Text::from(lines))
+            .wrap(Wrap { trim: false })
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(theme.border(false))
+                    .title(Span::styled(" Worker diagnostics ", theme.title()))
+                    .padding(Padding::horizontal(1)),
+            ),
+        detail_area,
+    );
+}
+
+fn render_deployment_dashboard(frame: &mut Frame<'_>, app: &App, area: Rect, theme: Theme) {
+    let [list_area, detail_area] = master_detail_areas(area);
+    let title = if app.loading_worker_deployments {
+        format!(
+            " Worker Deployments ({}) · page {} ⟳ ",
+            app.worker_deployments.len(),
+            app.deployment_page_number
+        )
+    } else {
+        format!(
+            " Worker Deployments ({}) · page {} ",
+            app.worker_deployments.len(),
+            app.deployment_page_number
+        )
+    };
+    let rows = app.worker_deployments.iter().map(|deployment| {
+        Row::new(vec![
+            Cell::from(deployment.name.clone()),
+            Cell::from(deployment.current_version.as_ref().map_or_else(
+                || "unversioned".to_string(),
+                |version| version.build_id.clone(),
+            )),
+            Cell::from(
+                deployment
+                    .ramping_version
+                    .as_ref()
+                    .map_or_else(|| "—".to_string(), |version| version.build_id.clone()),
+            ),
+            Cell::from(format!("{:.1}%", deployment.ramping_percentage)),
+            Cell::from(format_time(deployment.create_time.as_ref())),
+        ])
+    });
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Fill(2),
+            Constraint::Fill(2),
+            Constraint::Fill(2),
+            Constraint::Length(9),
+            Constraint::Length(17),
+        ],
+    )
+    .header(
+        Row::new(["DEPLOYMENT", "CURRENT", "RAMPING", "TRAFFIC", "CREATED"])
+            .style(theme.table_header()),
+    )
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(theme.accent())
+            .title(Span::styled(title, theme.title())),
+    )
+    .row_highlight_style(theme.selection())
+    .highlight_symbol("› ");
+    let mut state = TableState::default().with_selected(
+        (!app.worker_deployments.is_empty()).then_some(app.selected_worker_deployment),
+    );
+    frame.render_stateful_widget(table, list_area, &mut state);
+
+    let Some(details) = &app.worker_deployment_details else {
+        render_empty_panel(
+            frame,
+            detail_area,
+            " Deployment routing ",
+            app.worker_deployments_error.as_deref().unwrap_or(
+                if app.loading_worker_deployment_details {
+                    "Loading Worker Deployment routing…"
+                } else {
+                    "No Worker Deployments reported"
+                },
+            ),
+            theme,
+        );
+        return;
+    };
+    let mut lines = vec![
+        inspector_value("Name", &details.summary.name, theme),
+        inspector_value("Manager", &details.manager_identity, theme),
+        inspector_value("Modified by", &details.last_modifier_identity, theme),
+        inspector_value("Propagation", &details.routing_update_state, theme),
+        inspector_value(
+            "Current",
+            &details.summary.current_version.as_ref().map_or_else(
+                || "unversioned".to_string(),
+                crate::model::DeploymentVersion::label,
+            ),
+            theme,
+        ),
+        inspector_value(
+            "Ramping",
+            &details.summary.ramping_version.as_ref().map_or_else(
+                || "none".to_string(),
+                |version| {
+                    format!(
+                        "{} @ {:.1}%",
+                        version.label(),
+                        details.summary.ramping_percentage
+                    )
+                },
+            ),
+            theme,
+        ),
+        Line::default(),
+        inspector_section("VERSIONS AND DRAINAGE", theme),
+    ];
+    if details.versions.is_empty() {
+        lines.push(Line::from("No versions tracked").style(theme.muted()));
+    }
+    for version in &details.versions {
+        let routing = if version.is_current {
+            "CURRENT".to_string()
+        } else if version.is_ramping {
+            format!("RAMPING {:.1}%", version.ramp_percentage)
+        } else {
+            "INACTIVE".to_string()
+        };
+        lines.push(Line::from(vec![
+            Span::styled(version.version.build_id.clone(), theme.strong()),
+            Span::raw(format!(
+                " · {} · {} · drainage {} · checked {}",
+                version.status,
+                routing,
+                version.drainage_status,
+                format_time(version.drainage_last_checked.as_ref())
+            )),
+        ]));
+    }
+    frame.render_widget(
+        Paragraph::new(Text::from(lines))
+            .wrap(Wrap { trim: false })
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(theme.border(false))
+                    .title(Span::styled(" Deployment routing ", theme.title()))
+                    .padding(Padding::horizontal(1)),
+            ),
+        detail_area,
+    );
+}
+
+fn render_empty_panel(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    title: &'static str,
+    message: &str,
+    theme: Theme,
+) {
+    frame.render_widget(
+        Paragraph::new(message)
+            .alignment(Alignment::Center)
+            .wrap(Wrap { trim: true })
+            .style(theme.muted())
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(theme.border(false))
+                    .title(Span::styled(title, theme.title()))
+                    .padding(Padding::vertical(1)),
+            ),
+        area,
+    );
+}
+
+fn worker_status_style(status: &str, theme: Theme) -> Style {
+    if status.contains("RUNNING") {
+        theme.success()
+    } else if status.contains("STOPPED") || status.contains("FAILED") {
+        theme.error()
+    } else {
+        theme.warning()
     }
 }
 
@@ -332,27 +881,40 @@ fn render_footer(frame: &mut Frame<'_>, app: &App, area: Rect, theme: Theme) {
             Span::raw(&notice.text),
         ])
     } else {
-        Line::from(vec![
+        let mut spans = vec![
+            key_hint("1-4", "views", theme),
+            Span::raw("  "),
             key_hint("j/k", "move", theme),
             Span::raw("  "),
-            key_hint("tab", "pane", theme),
-            Span::raw("  "),
-            key_hint("/", "query", theme),
+        ];
+        match app.view {
+            View::Workflows => spans.extend([
+                key_hint("tab", "pane", theme),
+                Span::raw("  "),
+                key_hint("/", "query", theme),
+                Span::raw("  "),
+                key_hint("[/]", "pages", theme),
+                Span::raw("  "),
+                key_hint("v", "inspect", theme),
+                Span::raw("  "),
+                key_hint("e/o", "export/web", theme),
+                Span::raw("  "),
+            ]),
+            View::TaskQueues => spans.extend([key_hint("/", "queue name", theme), Span::raw("  ")]),
+            View::Workers | View::Deployments => {
+                spans.extend([key_hint("[/]", "pages", theme), Span::raw("  ")]);
+            }
+        }
+        spans.extend([
+            key_hint("r", "refresh", theme),
             Span::raw("  "),
             key_hint("n", "namespace", theme),
-            Span::raw("  "),
-            key_hint("[/]", "pages", theme),
-            Span::raw("  "),
-            key_hint("v", "inspect", theme),
-            Span::raw("  "),
-            key_hint("f", "filters", theme),
-            Span::raw("  "),
-            key_hint("e/o", "export/web", theme),
             Span::raw("  "),
             key_hint("?", "help", theme),
             Span::raw("  "),
             key_hint("q", "quit", theme),
-        ])
+        ]);
+        Line::from(spans)
     };
     frame.render_widget(Paragraph::new(line), area);
 }
@@ -361,6 +923,21 @@ fn render_help(frame: &mut Frame<'_>, area: Rect, theme: Theme) {
     let popup = centered(area, 82, 32);
     frame.render_widget(Clear, popup);
     let help = Text::from(vec![
+        help_section("VIEWS", theme),
+        help_line("1", "Workflows and complete history", theme),
+        help_line(
+            "2",
+            "Task Queue backlog, throughput, routing, pollers",
+            theme,
+        ),
+        help_line("3", "heartbeat-enabled Worker runtime diagnostics", theme),
+        help_line("4", "GA Worker Deployment routing and drainage", theme),
+        help_line(
+            "/",
+            "query Workflows or inspect a Task Queue by name",
+            theme,
+        ),
+        Line::default(),
         help_section("NAVIGATION", theme),
         help_line("j / ↓", "next workflow or history event", theme),
         help_line("k / ↑", "previous workflow or history event", theme),
@@ -414,6 +991,28 @@ fn render_query(frame: &mut Frame<'_>, area: Rect, input: &TextInput, theme: The
         .title(Span::styled(" Temporal visibility query ", theme.title()))
         .title_bottom(
             Line::from(" enter apply · esc cancel ")
+                .alignment(Alignment::Right)
+                .style(theme.muted()),
+        );
+    let horizontal_offset = input_horizontal_offset(input, popup.width.saturating_sub(2));
+    frame.render_widget(
+        Paragraph::new(input.value.as_str())
+            .scroll((0, horizontal_offset))
+            .block(block),
+        popup,
+    );
+    set_input_cursor(frame, popup, input, horizontal_offset);
+}
+
+fn render_task_queue_input(frame: &mut Frame<'_>, area: Rect, input: &TextInput, theme: Theme) {
+    let popup = centered(area, 72, 5);
+    frame.render_widget(Clear, popup);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(theme.accent())
+        .title(Span::styled(" Inspect Task Queue by name ", theme.title()))
+        .title_bottom(
+            Line::from(" enter load · esc cancel ")
                 .alignment(Alignment::Right)
                 .style(theme.muted()),
         );
@@ -962,6 +1561,21 @@ fn format_clock(value: Option<&DateTime<Utc>>) -> String {
     )
 }
 
+fn format_duration_seconds(seconds: f64) -> String {
+    let seconds = seconds.max(0.0);
+    if seconds >= 86_400.0 {
+        format!("{:.1}d", seconds / 86_400.0)
+    } else if seconds >= 3_600.0 {
+        format!("{:.1}h", seconds / 3_600.0)
+    } else if seconds >= 60.0 {
+        format!("{:.1}m", seconds / 60.0)
+    } else if seconds >= 1.0 {
+        format!("{seconds:.1}s")
+    } else {
+        format!("{:.0}ms", seconds * 1_000.0)
+    }
+}
+
 fn format_count(value: i64) -> String {
     if value >= 1_000_000 {
         format_decimal(value, 1_000_000, "m")
@@ -1098,8 +1712,11 @@ mod tests {
     use crate::{
         app::{AppConfig, Overlay},
         model::{
-            ClusterInfo, HistoryEventSummary, StructuredField, WorkflowCount, WorkflowCountGroup,
-            WorkflowDetails, WorkflowKey, WorkflowSummary,
+            ClusterInfo, DeploymentVersion, DeploymentVersionSummary, HistoryEventSummary,
+            PollerSummary, StructuredField, TaskQueueStats, TaskQueueSummary, TaskQueueType,
+            WorkerDeploymentDetails, WorkerDeploymentSummary, WorkerDetails, WorkerSlots,
+            WorkerSummary, WorkflowCount, WorkflowCountGroup, WorkflowDetails, WorkflowKey,
+            WorkflowSummary,
         },
     };
 
@@ -1114,6 +1731,7 @@ mod tests {
             auto_refresh: true,
             color: true,
             read_only: false,
+            codec_enabled: false,
             web_ui_url: Some("http://localhost:8233".to_string()),
             saved_queries: Vec::new(),
         });
@@ -1235,6 +1853,122 @@ mod tests {
         let aggregation = rendered(&app, 120, 32);
         assert!(aggregation.contains("Visibility aggregation"));
         assert!(aggregation.contains("FAILED"));
+    }
+
+    #[test]
+    fn renders_task_queue_worker_and_deployment_diagnostics() {
+        let deployment = DeploymentVersion {
+            deployment_name: "payments".to_string(),
+            build_id: "v1".to_string(),
+        };
+
+        let mut task_queue_app = sample_app();
+        task_queue_app.view = View::TaskQueues;
+        task_queue_app.task_queues = vec![TaskQueueSummary {
+            name: "payments".to_string(),
+            queue_type: TaskQueueType::Activity,
+            pollers: vec![PollerSummary {
+                identity: "worker-a".to_string(),
+                last_access_time: None,
+                rate_per_second: 8.0,
+                deployment_name: "payments".to_string(),
+                build_id: "v1".to_string(),
+            }],
+            stats: TaskQueueStats {
+                approximate_backlog_count: 2,
+                approximate_backlog_age_seconds: 9.0,
+                tasks_add_rate: 1.0,
+                tasks_dispatch_rate: 2.0,
+            },
+            current_deployment: Some(deployment.clone()),
+            ramping_deployment: None,
+            ramping_percentage: 0.0,
+            effective_rate_limit: Some(25.0),
+        }];
+        let task_queues = rendered(&task_queue_app, 140, 38);
+        assert!(task_queues.contains("TASK QUEUES"));
+        assert!(task_queues.contains("HEALTHY"));
+        assert!(task_queues.contains("payments:v1"));
+        assert!(task_queues.contains("25.00/s"));
+
+        let worker = WorkerSummary {
+            instance_key: "instance-a".to_string(),
+            identity: "worker-a".to_string(),
+            task_queue: "payments".to_string(),
+            deployment: Some(deployment.clone()),
+            sdk_name: "temporal-sdk-rust".to_string(),
+            sdk_version: "0.2.0".to_string(),
+            status: "RUNNING".to_string(),
+            start_time: None,
+            host_name: "host-a".to_string(),
+            process_id: "4242".to_string(),
+            plugins: vec!["otel@1.0".to_string()],
+        };
+        let slots = WorkerSlots {
+            available: 8,
+            used: 2,
+            supplier: "Fixed".to_string(),
+            processed: 100,
+            failed: 1,
+        };
+        let mut worker_app = sample_app();
+        worker_app.view = View::Workers;
+        worker_app.workers = vec![worker.clone()];
+        worker_app.worker_details = Some(WorkerDetails {
+            summary: worker,
+            heartbeat_time: None,
+            elapsed_since_heartbeat_seconds: 2.0,
+            host_cpu_usage: 0.25,
+            host_memory_usage: 0.5,
+            workflow_slots: slots.clone(),
+            activity_slots: slots,
+            local_activity_slots: WorkerSlots::default(),
+            nexus_slots: WorkerSlots::default(),
+            workflow_pollers: 4,
+            activity_pollers: 2,
+            nexus_pollers: 1,
+            sticky_cache_hits: 30,
+            sticky_cache_misses: 2,
+            sticky_cache_size: 12,
+        });
+        let workers = rendered(&worker_app, 140, 38);
+        assert!(workers.contains("WORKERS"));
+        assert!(workers.contains("CPU 25.0%"));
+        assert!(workers.contains("Fixed"));
+        assert!(workers.contains("otel@1.0"));
+
+        let deployment_summary = WorkerDeploymentSummary {
+            name: "payments".to_string(),
+            create_time: None,
+            current_version: Some(deployment.clone()),
+            ramping_version: None,
+            ramping_percentage: 0.0,
+            latest_version: Some(deployment.clone()),
+        };
+        let mut deployment_app = sample_app();
+        deployment_app.view = View::Deployments;
+        deployment_app.worker_deployments = vec![deployment_summary.clone()];
+        deployment_app.worker_deployment_details = Some(WorkerDeploymentDetails {
+            summary: deployment_summary,
+            versions: vec![DeploymentVersionSummary {
+                version: deployment,
+                status: "CURRENT".to_string(),
+                create_time: None,
+                is_current: true,
+                is_ramping: false,
+                ramp_percentage: 0.0,
+                drainage_status: "DRAINED".to_string(),
+                drainage_last_checked: None,
+            }],
+            manager_identity: "release-controller".to_string(),
+            last_modifier_identity: "operator-a".to_string(),
+            routing_update_state: "COMPLETED".to_string(),
+        });
+        let deployments = rendered(&deployment_app, 140, 38);
+        assert!(deployments.contains("DEPLOYMENTS"));
+        assert!(deployments.contains("release-controller"));
+        assert!(deployments.contains("DRAINED"));
+        assert!(deployments.contains("COMPLETED"));
     }
 
     #[test]

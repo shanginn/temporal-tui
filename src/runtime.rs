@@ -190,6 +190,66 @@ async fn execute(command: Command, service: &dyn TemporalService) -> Message {
                 .await
                 .map_err(|error| error.to_string()),
         },
+        Command::LoadTaskQueues {
+            request_id,
+            namespace,
+            names,
+        } => Message::TaskQueuesLoaded {
+            request_id,
+            result: service
+                .list_task_queues(&namespace, names)
+                .await
+                .map_err(|error| error.to_string()),
+        },
+        Command::LoadWorkers {
+            request_id,
+            namespace,
+            query,
+            page_size,
+            next_page_token,
+        } => Message::WorkersLoaded {
+            request_id,
+            result: service
+                .list_workers(&namespace, &query, page_size, next_page_token)
+                .await
+                .map_err(|error| error.to_string()),
+        },
+        Command::LoadWorkerDetails {
+            request_id,
+            namespace,
+            instance_key,
+        } => Message::WorkerDetailsLoaded {
+            request_id,
+            result: service
+                .describe_worker(&namespace, &instance_key)
+                .await
+                .map(Box::new)
+                .map_err(|error| error.to_string()),
+        },
+        Command::LoadWorkerDeployments {
+            request_id,
+            namespace,
+            page_size,
+            next_page_token,
+        } => Message::WorkerDeploymentsLoaded {
+            request_id,
+            result: service
+                .list_worker_deployments(&namespace, page_size, next_page_token)
+                .await
+                .map_err(|error| error.to_string()),
+        },
+        Command::LoadWorkerDeploymentDetails {
+            request_id,
+            namespace,
+            name,
+        } => Message::WorkerDeploymentDetailsLoaded {
+            request_id,
+            result: service
+                .describe_worker_deployment(&namespace, &name)
+                .await
+                .map(Box::new)
+                .map_err(|error| error.to_string()),
+        },
         Command::Cancel {
             request_id,
             namespace,

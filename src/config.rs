@@ -10,7 +10,7 @@ use directories::BaseDirs;
 use serde::{Deserialize, Serialize};
 use url::Url;
 
-use crate::service::{ClientTlsConfig, TemporalConnectionConfig};
+use crate::service::{ClientTlsConfig, PayloadCodecConfig, TemporalConnectionConfig};
 
 const CONFIG_SCHEMA_VERSION: u32 = 1;
 const KEYRING_SERVICE: &str = "io.temporal.temporal-tui";
@@ -84,6 +84,7 @@ pub struct ConnectionProfile {
     pub api_key: Option<SecretSource>,
     pub headers: BTreeMap<String, String>,
     pub secret_headers: BTreeMap<String, SecretSource>,
+    pub payload_codec: Option<ProfilePayloadCodec>,
     pub web_ui_url: Option<String>,
     pub read_only: bool,
 }
@@ -97,6 +98,7 @@ impl Default for ConnectionProfile {
             api_key: None,
             headers: BTreeMap::new(),
             secret_headers: BTreeMap::new(),
+            payload_codec: None,
             web_ui_url: Some("http://127.0.0.1:8233".to_string()),
             read_only: false,
         }
@@ -140,6 +142,69 @@ impl ConnectionProfile {
         }
         if let Some(secret) = &self.api_key {
             secret.validate()?;
+        }
+        for secret in self.secret_headers.values() {
+            secret.validate()?;
+        }
+        if let Some(codec) = &self.payload_codec {
+            codec.validate()?;
+        }
+        Ok(())
+    }
+}
+
+/// Non-secret Codec Server endpoint and secret references stored in a profile.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ProfilePayloadCodec {
+    pub endpoint: String,
+    pub headers: BTreeMap<String, String>,
+    pub secret_headers: BTreeMap<String, SecretSource>,
+}
+
+impl ProfilePayloadCodec {
+    fn validate(&self) -> Result<()> {
+        if self.endpoint.trim().is_empty() {
+            bail!("Payload Codec endpoint must not be empty");
+        }
+        let rendered = self.endpoint.replace("{namespace}", "namespace");
+        let url = Url::parse(&rendered).context("Payload Codec endpoint is not a valid URL")?;
+        if !matches!(url.scheme(), "http" | "https") {
+            bail!("Payload Codec endpoint must use http or https");
+        }
+        if !url.username().is_empty() || url.password().is_some() {
+            bail!("Payload Codec endpoint must not contain credentials");
+        }
+        if url.fragment().is_some() {
+            bail!("Payload Codec endpoint must not contain a fragment");
+        }
+        for key in self.headers.keys().chain(self.secret_headers.keys()) {
+            validate_header_name(key)?;
+            if matches!(
+                key.as_str(),
+                "content-type" | "content-length" | "host" | "x-namespace"
+            ) {
+                bail!("Payload Codec header `{key}` is managed by temporal-tui");
+            }
+        }
+        for key in self.headers.keys() {
+            if self.secret_headers.contains_key(key) {
+                bail!("Payload Codec header `{key}` is both public and secret");
+            }
+        }
+        if self
+            .headers
+            .keys()
+            .any(|key| looks_sensitive_header_name(key))
+        {
+            bail!("sensitive Payload Codec headers must use secret_headers");
+        }
+        if self.headers.values().any(|value| {
+            value
+                .bytes()
+                .any(|byte| matches!(byte, b'\0' | b'\r' | b'\n'))
+        }) {
+            bail!("Payload Codec header values contain invalid bytes");
         }
         for secret in self.secret_headers.values() {
             secret.validate()?;
@@ -324,6 +389,31 @@ impl ConfigStore {
                 resolve_secret(profile_name, &format!("header/{key}"), source)?,
             );
         }
+        let payload_codec = profile
+            .payload_codec
+            .as_ref()
+            .map(|codec| {
+                let mut headers = codec
+                    .headers
+                    .iter()
+                    .map(|(key, value)| (key.clone(), value.clone()))
+                    .collect::<HashMap<_, _>>();
+                for (key, source) in &codec.secret_headers {
+                    headers.insert(
+                        key.clone(),
+                        resolve_secret(
+                            profile_name,
+                            &format!("payload-codec/header/{key}"),
+                            source,
+                        )?,
+                    );
+                }
+                Ok::<_, anyhow::Error>(PayloadCodecConfig {
+                    endpoint: codec.endpoint.clone(),
+                    headers,
+                })
+            })
+            .transpose()?;
 
         let tls_enabled = profile.tls.enabled
             || api_key.is_some()
@@ -341,6 +431,7 @@ impl ConfigStore {
                     client_private_key: profile.tls.client_private_key.clone(),
                     server_name: profile.tls.server_name.clone(),
                 }),
+                payload_codec,
             },
             namespace: profile.namespace.clone(),
             web_ui_url: profile.web_ui_url.clone(),
@@ -481,6 +572,19 @@ mod tests {
             ..ConnectionProfile::default()
         };
         assert!(profile.validate().is_err());
+
+        let profile = ConnectionProfile {
+            payload_codec: Some(ProfilePayloadCodec {
+                endpoint: "https://codec.example".to_string(),
+                headers: BTreeMap::from([(
+                    "authorization".to_string(),
+                    "Bearer secret".to_string(),
+                )]),
+                ..ProfilePayloadCodec::default()
+            }),
+            ..ConnectionProfile::default()
+        };
+        assert!(profile.validate().is_err());
     }
 
     #[test]
@@ -519,12 +623,28 @@ mod tests {
                 api_key: Some(SecretSource::Env {
                     variable: variable.clone(),
                 }),
+                payload_codec: Some(ProfilePayloadCodec {
+                    endpoint: "https://codec.example/{namespace}".to_string(),
+                    secret_headers: BTreeMap::from([(
+                        "authorization".to_string(),
+                        SecretSource::Env {
+                            variable: variable.clone(),
+                        },
+                    )]),
+                    ..ProfilePayloadCodec::default()
+                }),
                 ..ConnectionProfile::default()
             },
         );
         let resolved = store.resolve_profile(&config, "dev").unwrap();
         assert_eq!(
             resolved.connection.api_key.as_deref(),
+            Some(expected.as_str())
+        );
+        let codec = resolved.connection.payload_codec.unwrap();
+        assert_eq!(codec.endpoint, "https://codec.example/{namespace}");
+        assert_eq!(
+            codec.headers.get("authorization").map(String::as_str),
             Some(expected.as_str())
         );
     }

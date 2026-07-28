@@ -5,15 +5,22 @@
 
 use std::{
     collections::HashMap,
+    io::{Read, Write},
     net::TcpListener,
     path::PathBuf,
     process::{Child, Command, Stdio},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+use base64::prelude::*;
 use temporal_tui::{
     model::WorkflowStatus,
-    service::{GrpcTemporalService, TemporalConnectionConfig, TemporalService},
+    service::{GrpcTemporalService, PayloadCodecConfig, TemporalConnectionConfig, TemporalService},
 };
 use tokio::time::sleep;
 
@@ -25,6 +32,63 @@ impl Drop for DevServer {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
+    }
+}
+
+struct CodecServer {
+    address: String,
+    stop: Arc<AtomicBool>,
+    thread: Option<thread::JoinHandle<()>>,
+}
+
+impl CodecServer {
+    fn start() -> Self {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind Codec Server");
+        let address = listener.local_addr().expect("Codec Server address");
+        listener
+            .set_nonblocking(true)
+            .expect("non-blocking Codec Server");
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread_stop = Arc::clone(&stop);
+        let thread = thread::spawn(move || {
+            while !thread_stop.load(Ordering::Relaxed) {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        let response = read_http_request(&mut stream)
+                            .and_then(|request| codec_response(&request))
+                            .unwrap_or_else(|error| {
+                                (
+                                    "400 Bad Request",
+                                    serde_json::json!({"error": error}).to_string(),
+                                )
+                            });
+                        write_http_response(&mut stream, response.0, &response.1);
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(error) => panic!("Codec Server accept failed: {error}"),
+                }
+            }
+        });
+        Self {
+            address: format!("http://{address}"),
+            stop,
+            thread: Some(thread),
+        }
+    }
+
+    fn endpoint(&self) -> String {
+        format!("{}/{{namespace}}", self.address)
+    }
+}
+
+impl Drop for CodecServer {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(thread) = self.thread.take() {
+            thread.join().expect("join Codec Server");
+        }
     }
 }
 
@@ -97,6 +161,47 @@ async fn live_dashboard_and_control_operations() {
     .await
     .expect("started workflow should appear in visibility");
     assert_eq!(workflow.status, WorkflowStatus::Running);
+
+    let task_queues = eventually(Duration::from_secs(10), || async {
+        service
+            .list_task_queues("default", vec!["temporal-tui-smoke".to_string()])
+            .await
+            .ok()
+            .filter(|queues| {
+                queues.len() == 2
+                    && queues.iter().any(|queue| {
+                        queue.queue_type.label() == "WORKFLOW"
+                            && queue.stats.approximate_backlog_count >= 2
+                    })
+            })
+    })
+    .await
+    .expect("Task Queue diagnostics should expose the queued Workflow Tasks");
+    assert!(task_queues.iter().any(|queue| {
+        queue.queue_type.label() == "WORKFLOW"
+            && queue.pollers.is_empty()
+            && queue.stats.approximate_backlog_count >= 2
+    }));
+    assert!(
+        task_queues
+            .iter()
+            .any(|queue| queue.queue_type.label() == "ACTIVITY")
+    );
+
+    let workers = service
+        .list_workers("default", "", 10, Vec::new())
+        .await
+        .expect("experimental Worker observability endpoint");
+    assert!(workers.workers.is_empty());
+    assert!(workers.next_page_token.is_empty());
+
+    let deployments = service
+        .list_worker_deployments("default", 10, Vec::new())
+        .await
+        .expect("GA Worker Deployment endpoint");
+    assert!(deployments.deployments.is_empty());
+    assert!(deployments.next_page_token.is_empty());
+
     let chain = service
         .list_workflow_chain("default", &workflow_id)
         .await
@@ -142,6 +247,62 @@ async fn live_dashboard_and_control_operations() {
         signaled.is_some(),
         "signal event should be visible in history"
     );
+
+    let codec_server = CodecServer::start();
+    let codec_service = GrpcTemporalService::connect(TemporalConnectionConfig {
+        address: address.clone(),
+        api_key: None,
+        headers: HashMap::new(),
+        tls: None,
+        payload_codec: Some(PayloadCodecConfig {
+            endpoint: codec_server.endpoint(),
+            headers: HashMap::new(),
+        }),
+    })
+    .await
+    .expect("connect client with Codec Server");
+    codec_service
+        .signal_workflow(
+            "default",
+            &workflow.key,
+            "codec-signal",
+            serde_json::json!({"codec_value":"roundtrip"}),
+        )
+        .await
+        .expect("send encoded signal");
+    let encoded = eventually(Duration::from_secs(5), || async {
+        service
+            .describe_workflow("default", &workflow.key)
+            .await
+            .ok()
+            .and_then(|details| {
+                details
+                    .events
+                    .into_iter()
+                    .find(|event| event.detail == "codec-signal")
+            })
+    })
+    .await
+    .expect("encoded signal event");
+    assert!(encoded.fields.iter().any(|field| {
+        field.encoding == "binary/encrypted" && !field.value.contains("roundtrip")
+    }));
+    let decoded = codec_service
+        .describe_workflow("default", &workflow.key)
+        .await
+        .expect("decode Workflow history through Codec Server");
+    let decoded = decoded
+        .events
+        .iter()
+        .find(|event| event.detail == "codec-signal")
+        .expect("decoded signal event");
+    assert!(
+        decoded
+            .fields
+            .iter()
+            .any(|field| { field.encoding == "json/plain" && field.value.contains("roundtrip") })
+    );
+
     service
         .signal_workflow(
             "default",
@@ -307,6 +468,7 @@ async fn connect_with_retry(address: &str) -> GrpcTemporalService {
             api_key: None,
             headers: HashMap::new(),
             tls: None,
+            payload_codec: None,
         })
         .await
         {
@@ -358,6 +520,100 @@ fn start_smoke_workflow(temporal_cli: &PathBuf, address: &str, workflow_id: &str
             "none",
         ],
     );
+}
+
+fn read_http_request(stream: &mut std::net::TcpStream) -> Result<String, String> {
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .map_err(|error| error.to_string())?;
+    let mut request = Vec::new();
+    let mut buffer = [0_u8; 8192];
+    let mut expected_length = None;
+    loop {
+        let count = stream
+            .read(&mut buffer)
+            .map_err(|error| error.to_string())?;
+        if count == 0 {
+            break;
+        }
+        request.extend_from_slice(&buffer[..count]);
+        if expected_length.is_none()
+            && let Some(header_end) = request.windows(4).position(|window| window == b"\r\n\r\n")
+        {
+            let headers = String::from_utf8_lossy(&request[..header_end]);
+            let content_length = headers.lines().find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.eq_ignore_ascii_case("content-length")
+                    .then(|| value.trim().parse::<usize>().ok())
+                    .flatten()
+            });
+            expected_length = content_length.map(|length| header_end.saturating_add(4 + length));
+        }
+        if expected_length.is_some_and(|length| request.len() >= length) {
+            break;
+        }
+    }
+    String::from_utf8(request).map_err(|error| error.to_string())
+}
+
+fn codec_response(request: &str) -> Result<(&'static str, String), String> {
+    let (headers, body) = request
+        .split_once("\r\n\r\n")
+        .ok_or_else(|| "missing HTTP body".to_string())?;
+    let operation = if headers.starts_with("POST ") && headers.contains("/encode HTTP/") {
+        "encode"
+    } else if headers.starts_with("POST ") && headers.contains("/decode HTTP/") {
+        "decode"
+    } else {
+        return Err("unsupported Codec Server path".to_string());
+    };
+    let mut payloads: serde_json::Value =
+        serde_json::from_str(body).map_err(|error| error.to_string())?;
+    let payloads = payloads
+        .get_mut("payloads")
+        .and_then(serde_json::Value::as_array_mut)
+        .ok_or_else(|| "missing payloads array".to_string())?;
+    for payload in &mut *payloads {
+        if operation == "encode" {
+            let raw = serde_json::to_vec(payload).map_err(|error| error.to_string())?;
+            *payload = serde_json::json!({
+                "metadata": {
+                    "encoding": BASE64_STANDARD.encode("binary/encrypted")
+                },
+                "data": BASE64_STANDARD.encode(raw)
+            });
+            continue;
+        }
+        let encoding = payload
+            .get("metadata")
+            .and_then(|metadata| metadata.get("encoding"))
+            .and_then(serde_json::Value::as_str)
+            .and_then(|value| BASE64_STANDARD.decode(value).ok());
+        if encoding.as_deref() == Some(b"binary/encrypted") {
+            let data = payload
+                .get("data")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| "encrypted payload has no data".to_string())?;
+            let data = BASE64_STANDARD
+                .decode(data)
+                .map_err(|error| error.to_string())?;
+            *payload = serde_json::from_slice(&data).map_err(|error| error.to_string())?;
+        }
+    }
+    Ok(("200 OK", payloads_to_body(payloads)))
+}
+
+fn payloads_to_body(payloads: &[serde_json::Value]) -> String {
+    serde_json::json!({ "payloads": payloads }).to_string()
+}
+
+fn write_http_response(stream: &mut std::net::TcpStream, status: &str, body: &str) {
+    write!(
+        stream,
+        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    )
+    .expect("write Codec Server response");
 }
 
 async fn eventually<T, FutureType, Factory>(timeout: Duration, mut factory: Factory) -> Option<T>

@@ -1,31 +1,55 @@
-use std::{collections::HashMap, path::PathBuf};
+use std::{
+    collections::{HashMap, VecDeque},
+    path::PathBuf,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
 use async_trait::async_trait;
 use base64::prelude::*;
 use chrono::{DateTime, Utc};
+use futures_util::{StreamExt, future::BoxFuture};
+use reqwest::{
+    header::{CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue},
+    redirect::Policy,
+};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use temporalio_client::{
     Client, ClientOptions, ClientTlsOptions, Connection, ConnectionOptions, TlsOptions,
-    UntypedSignal, WorkflowCancelOptions, WorkflowDescribeOptions, WorkflowExecutionInfo,
-    WorkflowHandle, WorkflowSignalOptions, WorkflowTerminateOptions,
+    WorkflowCancelOptions, WorkflowDescribeOptions, WorkflowExecutionInfo, WorkflowHandle,
+    WorkflowTerminateOptions,
     tonic::{IntoRequest, Request, Status},
 };
 use temporalio_common::{
     UntypedWorkflow,
     data_converters::{PayloadConverter, RawValue},
+    payload_visitor::{AsyncPayloadVisitor, PayloadField, PayloadFieldData, PayloadVisitable},
     protos::{
         proto_ts_to_system_time,
         temporal::api::{
             common::v1::{Payload, Payloads, WorkflowExecution as ProtoWorkflowExecution},
-            enums::v1::{EventType, PendingActivityState, WorkflowExecutionStatus},
+            deployment::v1::{
+                WorkerDeploymentInfo as ProtoWorkerDeploymentInfo,
+                WorkerDeploymentVersion as ProtoDeploymentVersion,
+            },
+            enums::v1::{
+                EventType, PendingActivityState, RoutingConfigUpdateState,
+                TaskQueueType as ProtoTaskQueueType, VersionDrainageStatus,
+                WorkerDeploymentVersionStatus, WorkerStatus, WorkflowExecutionStatus,
+            },
             failure::v1::{Failure, failure::FailureInfo},
             history::v1::{HistoryEvent, history_event::Attributes},
+            taskqueue::v1::{TaskQueue as ProtoTaskQueue, TaskQueueStats as ProtoTaskQueueStats},
+            worker::v1::{WorkerHeartbeat, WorkerListInfo, WorkerSlotsInfo},
             workflow::v1::PendingActivityInfo,
             workflow::v1::WorkflowExecutionInfo as ProtoWorkflowExecutionInfo,
             workflowservice::v1::{
-                CountWorkflowExecutionsRequest, DescribeNamespaceResponse, GetClusterInfoRequest,
+                CountWorkflowExecutionsRequest, DescribeNamespaceResponse,
+                DescribeTaskQueueRequest, DescribeTaskQueueResponse,
+                DescribeWorkerDeploymentRequest, DescribeWorkerRequest, GetClusterInfoRequest,
                 GetWorkflowExecutionHistoryReverseRequest, ListNamespacesRequest,
-                ListWorkflowExecutionsRequest,
+                ListWorkerDeploymentsRequest, ListWorkersRequest, ListWorkflowExecutionsRequest,
+                SignalWorkflowExecutionRequest, list_worker_deployments_response,
             },
         },
     },
@@ -34,9 +58,12 @@ use thiserror::Error;
 use url::Url;
 
 use crate::model::{
-    ClusterInfo, FailureSummary, HistoryEventSummary, HistoryPage, NamespaceSummary,
-    PendingActivitySummary, StructuredField, WorkflowCount, WorkflowCountGroup, WorkflowDetails,
-    WorkflowKey, WorkflowPage, WorkflowStatus, WorkflowSummary,
+    ClusterInfo, DeploymentVersion, DeploymentVersionSummary, FailureSummary, HistoryEventSummary,
+    HistoryPage, NamespaceSummary, PendingActivitySummary, PollerSummary, StructuredField,
+    TaskQueueStats, TaskQueueSummary, TaskQueueType, WorkerDeploymentDetails, WorkerDeploymentPage,
+    WorkerDeploymentSummary, WorkerDetails, WorkerPage, WorkerSlots, WorkerSummary, WorkflowCount,
+    WorkflowCountGroup, WorkflowDetails, WorkflowKey, WorkflowPage, WorkflowStatus,
+    WorkflowSummary,
 };
 
 /// TLS settings loaded by the client at startup.
@@ -55,6 +82,14 @@ pub struct TemporalConnectionConfig {
     pub api_key: Option<String>,
     pub headers: HashMap<String, String>,
     pub tls: Option<ClientTlsConfig>,
+    pub payload_codec: Option<PayloadCodecConfig>,
+}
+
+/// Remote Temporal Codec Server settings.
+#[derive(Debug, Clone)]
+pub struct PayloadCodecConfig {
+    pub endpoint: String,
+    pub headers: HashMap<String, String>,
 }
 
 /// Errors returned by the Temporal service adapter.
@@ -87,6 +122,426 @@ pub enum ServiceError {
         operation: &'static str,
         message: String,
     },
+
+    #[error("invalid Payload Codec configuration: {0}")]
+    CodecConfig(String),
+
+    #[error("Payload Codec {operation} failed: {message}")]
+    Codec {
+        operation: &'static str,
+        message: String,
+    },
+}
+
+const MAX_CODEC_CHUNK_PAYLOADS: usize = 128;
+const MAX_CODEC_CHUNK_BYTES: usize = 4 * 1024 * 1024;
+const MAX_CODEC_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
+
+#[derive(Debug, Clone, Copy)]
+enum CodecOperation {
+    Encode,
+    Decode,
+}
+
+impl CodecOperation {
+    const fn path(self) -> &'static str {
+        match self {
+            Self::Encode => "encode",
+            Self::Decode => "decode",
+        }
+    }
+}
+
+#[derive(Clone)]
+struct HttpPayloadCodec {
+    client: reqwest::Client,
+    endpoint_template: String,
+    headers: HeaderMap,
+}
+
+impl HttpPayloadCodec {
+    fn new(config: PayloadCodecConfig) -> Result<Self, ServiceError> {
+        let mut headers = HeaderMap::new();
+        for (name, value) in config.headers {
+            if matches!(
+                name.as_str(),
+                "content-type" | "content-length" | "host" | "x-namespace"
+            ) {
+                return Err(ServiceError::CodecConfig(format!(
+                    "header `{name}` is managed by temporal-tui"
+                )));
+            }
+            let name = HeaderName::from_bytes(name.as_bytes()).map_err(|_| {
+                ServiceError::CodecConfig("a Codec Server header name is invalid".to_string())
+            })?;
+            let value = HeaderValue::from_str(&value).map_err(|_| {
+                ServiceError::CodecConfig(format!(
+                    "Codec Server header `{name}` contains invalid bytes"
+                ))
+            })?;
+            headers.insert(name, value);
+        }
+
+        let codec = Self {
+            client: reqwest::Client::builder()
+                .redirect(Policy::none())
+                .timeout(Duration::from_secs(10))
+                .user_agent(concat!("temporal-tui/", env!("CARGO_PKG_VERSION")))
+                .build()
+                .map_err(|error| ServiceError::CodecConfig(error.to_string()))?,
+            endpoint_template: config.endpoint,
+            headers,
+        };
+        codec.url("validation", CodecOperation::Decode)?;
+        Ok(codec)
+    }
+
+    async fn transform(
+        &self,
+        namespace: &str,
+        operation: CodecOperation,
+        payloads: Vec<Payload>,
+    ) -> Result<Vec<Payload>, ServiceError> {
+        if payloads.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let expected = payloads.len();
+        let mut transformed = Vec::with_capacity(expected);
+        let mut chunk = Vec::new();
+        let mut chunk_bytes = 0_usize;
+        for payload in payloads {
+            let payload_bytes = payload_wire_size(&payload);
+            if payload_bytes > MAX_CODEC_CHUNK_BYTES {
+                return Err(codec_error(
+                    operation,
+                    "one payload exceeds the 4 MiB Codec Server safety limit",
+                ));
+            }
+            if !chunk.is_empty()
+                && (chunk.len() >= MAX_CODEC_CHUNK_PAYLOADS
+                    || chunk_bytes.saturating_add(payload_bytes) > MAX_CODEC_CHUNK_BYTES)
+            {
+                transformed.extend(
+                    self.transform_chunk(namespace, operation, std::mem::take(&mut chunk))
+                        .await?,
+                );
+                chunk_bytes = 0;
+            }
+            chunk_bytes = chunk_bytes.saturating_add(payload_bytes);
+            chunk.push(payload);
+        }
+        if !chunk.is_empty() {
+            transformed.extend(self.transform_chunk(namespace, operation, chunk).await?);
+        }
+        if transformed.len() != expected {
+            return Err(codec_error(
+                operation,
+                format!(
+                    "response contained {} payloads; expected {expected}",
+                    transformed.len()
+                ),
+            ));
+        }
+        Ok(transformed)
+    }
+
+    async fn transform_chunk(
+        &self,
+        namespace: &str,
+        operation: CodecOperation,
+        payloads: Vec<Payload>,
+    ) -> Result<Vec<Payload>, ServiceError> {
+        let expected = payloads.len();
+        let body =
+            serde_json::to_vec(&CodecWirePayloads::from_payloads(payloads)).map_err(|error| {
+                codec_error(operation, format!("could not encode request: {error}"))
+            })?;
+        if body.len() > MAX_CODEC_RESPONSE_BYTES {
+            return Err(codec_error(
+                operation,
+                "encoded request exceeds the 8 MiB Codec Server safety limit",
+            ));
+        }
+        let namespace_header = HeaderValue::from_str(namespace)
+            .map_err(|_| codec_error(operation, "namespace contains invalid header bytes"))?;
+        let response = self
+            .client
+            .post(self.url(namespace, operation)?)
+            .headers(self.headers.clone())
+            .header("x-namespace", namespace_header)
+            .header(CONTENT_TYPE, "application/json")
+            .body(body)
+            .send()
+            .await
+            .map_err(|error| codec_error(operation, format!("request failed: {error}")))?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(codec_error(
+                operation,
+                format!("server returned HTTP {status}"),
+            ));
+        }
+        if response
+            .content_length()
+            .is_some_and(|length| length > MAX_CODEC_RESPONSE_BYTES as u64)
+        {
+            return Err(codec_error(
+                operation,
+                "response exceeds the 8 MiB Codec Server safety limit",
+            ));
+        }
+        let mut response_body = Vec::new();
+        let mut stream = response.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk
+                .map_err(|error| codec_error(operation, format!("response failed: {error}")))?;
+            if response_body.len().saturating_add(chunk.len()) > MAX_CODEC_RESPONSE_BYTES {
+                return Err(codec_error(
+                    operation,
+                    "response exceeds the 8 MiB Codec Server safety limit",
+                ));
+            }
+            response_body.extend_from_slice(&chunk);
+        }
+        let wire: CodecWirePayloads = serde_json::from_slice(&response_body).map_err(|error| {
+            codec_error(
+                operation,
+                format!("response is not Payloads protobuf JSON: {error}"),
+            )
+        })?;
+        let transformed = wire.into_payloads(operation)?;
+        if transformed.len() != expected {
+            return Err(codec_error(
+                operation,
+                format!(
+                    "response contained {} payloads; expected {expected}",
+                    transformed.len()
+                ),
+            ));
+        }
+        Ok(transformed)
+    }
+
+    fn url(&self, namespace: &str, operation: CodecOperation) -> Result<Url, ServiceError> {
+        let encoded_namespace = encode_path_segment(namespace);
+        let rendered = self
+            .endpoint_template
+            .replace("{namespace}", &encoded_namespace);
+        let mut url = Url::parse(&rendered)
+            .map_err(|error| ServiceError::CodecConfig(format!("invalid endpoint URL: {error}")))?;
+        if !matches!(url.scheme(), "http" | "https") {
+            return Err(ServiceError::CodecConfig(
+                "endpoint must use http or https".to_string(),
+            ));
+        }
+        if !url.username().is_empty() || url.password().is_some() {
+            return Err(ServiceError::CodecConfig(
+                "endpoint must not contain credentials; use secret headers".to_string(),
+            ));
+        }
+        if url.fragment().is_some() {
+            return Err(ServiceError::CodecConfig(
+                "endpoint must not contain a fragment".to_string(),
+            ));
+        }
+        let replace_operation = url
+            .path_segments()
+            .and_then(Iterator::last)
+            .is_some_and(|segment| matches!(segment, "encode" | "decode"));
+        {
+            let mut segments = url.path_segments_mut().map_err(|()| {
+                ServiceError::CodecConfig("endpoint cannot be used as a base URL".to_string())
+            })?;
+            segments.pop_if_empty();
+            if replace_operation {
+                segments.pop();
+            }
+            segments.push(operation.path());
+        }
+        Ok(url)
+    }
+}
+
+fn codec_error(operation: CodecOperation, message: impl Into<String>) -> ServiceError {
+    ServiceError::Codec {
+        operation: operation.path(),
+        message: message.into(),
+    }
+}
+
+fn encode_path_segment(value: &str) -> String {
+    let mut url = Url::parse("http://codec.invalid/").expect("static URL is valid");
+    url.path_segments_mut()
+        .expect("HTTP URL accepts path segments")
+        .push(value);
+    url.path().trim_start_matches('/').to_string()
+}
+
+fn payload_wire_size(payload: &Payload) -> usize {
+    payload.data.len()
+        + payload
+            .metadata
+            .iter()
+            .map(|(key, value)| key.len().saturating_add(value.len()))
+            .sum::<usize>()
+        + payload.external_payloads.len().saturating_mul(16)
+}
+
+#[derive(Serialize, Deserialize)]
+struct CodecWirePayloads {
+    #[serde(default)]
+    payloads: Vec<CodecWirePayload>,
+}
+
+impl CodecWirePayloads {
+    fn from_payloads(payloads: Vec<Payload>) -> Self {
+        Self {
+            payloads: payloads.into_iter().map(CodecWirePayload::from).collect(),
+        }
+    }
+
+    fn into_payloads(self, operation: CodecOperation) -> Result<Vec<Payload>, ServiceError> {
+        self.payloads
+            .into_iter()
+            .map(|payload| payload.into_payload(operation))
+            .collect()
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+struct CodecWirePayload {
+    #[serde(default)]
+    metadata: HashMap<String, String>,
+    #[serde(default)]
+    data: String,
+    #[serde(
+        rename = "externalPayloads",
+        default,
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    external_payloads: Vec<CodecWireExternalPayload>,
+}
+
+impl From<Payload> for CodecWirePayload {
+    fn from(payload: Payload) -> Self {
+        Self {
+            metadata: payload
+                .metadata
+                .into_iter()
+                .map(|(key, value)| (key, BASE64_STANDARD.encode(value)))
+                .collect(),
+            data: BASE64_STANDARD.encode(payload.data),
+            external_payloads: payload
+                .external_payloads
+                .into_iter()
+                .map(|details| CodecWireExternalPayload {
+                    size_bytes: details.size_bytes.to_string(),
+                })
+                .collect(),
+        }
+    }
+}
+
+impl CodecWirePayload {
+    fn into_payload(self, operation: CodecOperation) -> Result<Payload, ServiceError> {
+        let metadata = self
+            .metadata
+            .into_iter()
+            .map(|(key, value)| BASE64_STANDARD.decode(value).map(|value| (key, value)))
+            .collect::<Result<HashMap<_, _>, _>>()
+            .map_err(|_| codec_error(operation, "response metadata contains invalid base64"))?;
+        let data = BASE64_STANDARD
+            .decode(self.data)
+            .map_err(|_| codec_error(operation, "response data contains invalid base64"))?;
+        let external_payloads = self
+            .external_payloads
+            .into_iter()
+            .map(|details| {
+                details
+                    .size_bytes
+                    .parse::<i64>()
+                    .map(|size_bytes| {
+                        temporalio_common::protos::temporal::api::common::v1::payload::ExternalPayloadDetails {
+                            size_bytes,
+                        }
+                    })
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| {
+                codec_error(
+                    operation,
+                    "response external payload size is not a protobuf int64 string",
+                )
+            })?;
+        Ok(Payload {
+            metadata,
+            data,
+            external_payloads,
+        })
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+struct CodecWireExternalPayload {
+    #[serde(rename = "sizeBytes")]
+    size_bytes: String,
+}
+
+#[derive(Default)]
+struct CollectPayloads {
+    payloads: Vec<Payload>,
+}
+
+impl AsyncPayloadVisitor for CollectPayloads {
+    fn visit<'a>(&'a mut self, field: PayloadField<'a>) -> BoxFuture<'a, ()> {
+        Box::pin(async move {
+            match field.data {
+                PayloadFieldData::Single(payload) => self.payloads.push(payload.clone()),
+                PayloadFieldData::Repeated(payloads) => {
+                    self.payloads.extend(payloads.iter().cloned());
+                }
+                PayloadFieldData::Payloads(payloads) => {
+                    self.payloads.extend(payloads.payloads.iter().cloned());
+                }
+            }
+        })
+    }
+}
+
+struct ReplacePayloads {
+    payloads: VecDeque<Payload>,
+    missing: bool,
+}
+
+impl ReplacePayloads {
+    fn replace(&mut self, target: &mut Payload) {
+        if let Some(payload) = self.payloads.pop_front() {
+            *target = payload;
+        } else {
+            self.missing = true;
+        }
+    }
+}
+
+impl AsyncPayloadVisitor for ReplacePayloads {
+    fn visit<'a>(&'a mut self, field: PayloadField<'a>) -> BoxFuture<'a, ()> {
+        Box::pin(async move {
+            match field.data {
+                PayloadFieldData::Single(payload) => self.replace(payload),
+                PayloadFieldData::Repeated(payloads) => {
+                    for payload in payloads {
+                        self.replace(payload);
+                    }
+                }
+                PayloadFieldData::Payloads(payloads) => {
+                    for payload in &mut payloads.payloads {
+                        self.replace(payload);
+                    }
+                }
+            }
+        })
+    }
 }
 
 /// Operations consumed by the dashboard.
@@ -129,6 +584,39 @@ pub trait TemporalService: Send + Sync {
         workflow_id: &str,
     ) -> Result<Vec<WorkflowSummary>, ServiceError>;
 
+    async fn list_task_queues(
+        &self,
+        namespace: &str,
+        names: Vec<String>,
+    ) -> Result<Vec<TaskQueueSummary>, ServiceError>;
+
+    async fn list_workers(
+        &self,
+        namespace: &str,
+        query: &str,
+        page_size: usize,
+        next_page_token: Vec<u8>,
+    ) -> Result<WorkerPage, ServiceError>;
+
+    async fn describe_worker(
+        &self,
+        namespace: &str,
+        instance_key: &str,
+    ) -> Result<WorkerDetails, ServiceError>;
+
+    async fn list_worker_deployments(
+        &self,
+        namespace: &str,
+        page_size: usize,
+        next_page_token: Vec<u8>,
+    ) -> Result<WorkerDeploymentPage, ServiceError>;
+
+    async fn describe_worker_deployment(
+        &self,
+        namespace: &str,
+        name: &str,
+    ) -> Result<WorkerDeploymentDetails, ServiceError>;
+
     async fn cancel_workflow(
         &self,
         namespace: &str,
@@ -156,6 +644,7 @@ pub trait TemporalService: Send + Sync {
 #[derive(Clone)]
 pub struct GrpcTemporalService {
     connection: Connection,
+    payload_codec: Option<HttpPayloadCodec>,
 }
 
 impl GrpcTemporalService {
@@ -166,6 +655,10 @@ impl GrpcTemporalService {
     /// Returns an error for an invalid address, unreadable TLS material, invalid
     /// client configuration, or an unreachable Temporal frontend.
     pub async fn connect(config: TemporalConnectionConfig) -> Result<Self, ServiceError> {
+        let payload_codec = config
+            .payload_codec
+            .map(HttpPayloadCodec::new)
+            .transpose()?;
         let address = normalize_address(&config.address, config.tls.is_some());
         let target = Url::parse(&address).map_err(|source| ServiceError::InvalidAddress {
             address: address.clone(),
@@ -184,7 +677,10 @@ impl GrpcTemporalService {
         let connection = Connection::connect(options)
             .await
             .map_err(|error| ServiceError::Connect(error.to_string()))?;
-        Ok(Self { connection })
+        Ok(Self {
+            connection,
+            payload_codec,
+        })
     }
 
     fn client(&self, namespace: &str) -> Result<Client, ServiceError> {
@@ -215,6 +711,55 @@ impl GrpcTemporalService {
         ))
     }
 
+    async fn decode_message<Message>(
+        &self,
+        namespace: &str,
+        message: &mut Message,
+    ) -> Result<(), ServiceError>
+    where
+        Message: PayloadVisitable + Send,
+    {
+        let Some(codec) = &self.payload_codec else {
+            return Ok(());
+        };
+        let mut collector = CollectPayloads::default();
+        message.visit_payloads_mut(&mut collector).await;
+        if collector.payloads.is_empty() {
+            return Ok(());
+        }
+        let expected = collector.payloads.len();
+        let payloads = codec
+            .transform(namespace, CodecOperation::Decode, collector.payloads)
+            .await?;
+        let mut replacer = ReplacePayloads {
+            payloads: payloads.into(),
+            missing: false,
+        };
+        message.visit_payloads_mut(&mut replacer).await;
+        if replacer.missing || !replacer.payloads.is_empty() {
+            return Err(codec_error(
+                CodecOperation::Decode,
+                format!("payload traversal changed while replacing {expected} values"),
+            ));
+        }
+        Ok(())
+    }
+
+    async fn encode_payloads(
+        &self,
+        namespace: &str,
+        payloads: Vec<Payload>,
+    ) -> Result<Vec<Payload>, ServiceError> {
+        match &self.payload_codec {
+            Some(codec) => {
+                codec
+                    .transform(namespace, CodecOperation::Encode, payloads)
+                    .await
+            }
+            None => Ok(payloads),
+        }
+    }
+
     async fn recent_history(
         &self,
         namespace: &str,
@@ -222,7 +767,7 @@ impl GrpcTemporalService {
         next_page_token: Vec<u8>,
     ) -> Result<HistoryPage, ServiceError> {
         let mut service = self.connection.workflow_service();
-        let response = service
+        let mut response = service
             .get_workflow_execution_history_reverse(
                 GetWorkflowExecutionHistoryReverseRequest {
                     namespace: namespace.to_string(),
@@ -241,6 +786,7 @@ impl GrpcTemporalService {
                 source,
             })?
             .into_inner();
+        self.decode_message(namespace, &mut response).await?;
         let mut events = response
             .history
             .map(|history| history.events)
@@ -351,7 +897,7 @@ impl TemporalService for GrpcTemporalService {
         query: &str,
     ) -> Result<WorkflowCount, ServiceError> {
         let mut service = self.connection.workflow_service();
-        let response = service
+        let mut response = service
             .count_workflow_executions(
                 CountWorkflowExecutionsRequest {
                     namespace: namespace.to_string(),
@@ -365,6 +911,7 @@ impl TemporalService for GrpcTemporalService {
                 source,
             })?
             .into_inner();
+        self.decode_message(namespace, &mut response).await?;
 
         Ok(WorkflowCount {
             total: response.count,
@@ -403,8 +950,18 @@ impl TemporalService for GrpcTemporalService {
         };
         let recent_history = self.recent_history(namespace, key, Vec::new());
         let (description, history) = tokio::try_join!(describe, recent_history)?;
-
-        let raw = description.raw();
+        let mut raw = description.into_raw();
+        self.decode_message(namespace, &mut raw).await?;
+        let user_metadata = raw
+            .execution_config
+            .as_ref()
+            .and_then(|config| config.user_metadata.as_ref());
+        let static_summary = user_metadata
+            .and_then(|metadata| metadata.summary.as_ref())
+            .and_then(payload_display_text);
+        let static_details = user_metadata
+            .and_then(|metadata| metadata.details.as_ref())
+            .and_then(payload_display_text);
         let raw_info =
             raw.workflow_execution_info
                 .as_ref()
@@ -445,8 +1002,8 @@ impl TemporalService for GrpcTemporalService {
             pending_children: raw.pending_children.len(),
             pending_nexus_operations: raw.pending_nexus_operations.len(),
             state_transition_count: raw_info.state_transition_count,
-            static_summary: description.static_summary().map(ToOwned::to_owned),
-            static_details: description.static_details().map(ToOwned::to_owned),
+            static_summary,
+            static_details,
             memo: raw_info
                 .memo
                 .as_ref()
@@ -493,6 +1050,170 @@ impl TemporalService for GrpcTemporalService {
         }
         workflows.sort_by_key(|workflow| std::cmp::Reverse(workflow.start_time));
         Ok(workflows)
+    }
+
+    async fn list_task_queues(
+        &self,
+        namespace: &str,
+        mut names: Vec<String>,
+    ) -> Result<Vec<TaskQueueSummary>, ServiceError> {
+        names.retain(|name| !name.trim().is_empty());
+        names.sort();
+        names.dedup();
+        let mut summaries = Vec::with_capacity(names.len().saturating_mul(2));
+        let mut service = self.connection.workflow_service();
+        for name in names {
+            for (queue_type, proto_type) in [
+                (TaskQueueType::Workflow, ProtoTaskQueueType::Workflow),
+                (TaskQueueType::Activity, ProtoTaskQueueType::Activity),
+            ] {
+                let response = service
+                    .describe_task_queue(
+                        DescribeTaskQueueRequest {
+                            namespace: namespace.to_string(),
+                            task_queue: Some(ProtoTaskQueue {
+                                name: name.clone(),
+                                ..Default::default()
+                            }),
+                            task_queue_type: proto_type as i32,
+                            report_stats: true,
+                            report_config: true,
+                            ..Default::default()
+                        }
+                        .into_request(),
+                    )
+                    .await
+                    .map_err(|source| ServiceError::Rpc {
+                        operation: "describe task queue",
+                        source,
+                    })?
+                    .into_inner();
+                summaries.push(task_queue_summary(name.clone(), queue_type, &response));
+            }
+        }
+        Ok(summaries)
+    }
+
+    async fn list_workers(
+        &self,
+        namespace: &str,
+        query: &str,
+        page_size: usize,
+        next_page_token: Vec<u8>,
+    ) -> Result<WorkerPage, ServiceError> {
+        let mut service = self.connection.workflow_service();
+        let response = service
+            .list_workers(
+                ListWorkersRequest {
+                    namespace: namespace.to_string(),
+                    page_size: i32::try_from(page_size).unwrap_or(i32::MAX),
+                    next_page_token,
+                    query: query.to_string(),
+                    include_system_workers: false,
+                }
+                .into_request(),
+            )
+            .await
+            .map_err(|source| ServiceError::Rpc {
+                operation: "list workers",
+                source,
+            })?
+            .into_inner();
+        Ok(WorkerPage {
+            workers: response.workers.iter().map(worker_summary).collect(),
+            next_page_token: response.next_page_token,
+        })
+    }
+
+    async fn describe_worker(
+        &self,
+        namespace: &str,
+        instance_key: &str,
+    ) -> Result<WorkerDetails, ServiceError> {
+        let mut service = self.connection.workflow_service();
+        let response = service
+            .describe_worker(
+                DescribeWorkerRequest {
+                    namespace: namespace.to_string(),
+                    worker_instance_key: instance_key.to_string(),
+                }
+                .into_request(),
+            )
+            .await
+            .map_err(|source| ServiceError::Rpc {
+                operation: "describe worker",
+                source,
+            })?
+            .into_inner();
+        let heartbeat = response
+            .worker_info
+            .and_then(|info| info.worker_heartbeat)
+            .ok_or_else(|| ServiceError::Client {
+                operation: "describe worker",
+                message: "response did not include a worker heartbeat".to_string(),
+            })?;
+        Ok(worker_details(&heartbeat))
+    }
+
+    async fn list_worker_deployments(
+        &self,
+        namespace: &str,
+        page_size: usize,
+        next_page_token: Vec<u8>,
+    ) -> Result<WorkerDeploymentPage, ServiceError> {
+        let mut service = self.connection.workflow_service();
+        let response = service
+            .list_worker_deployments(
+                ListWorkerDeploymentsRequest {
+                    namespace: namespace.to_string(),
+                    page_size: i32::try_from(page_size).unwrap_or(i32::MAX),
+                    next_page_token,
+                }
+                .into_request(),
+            )
+            .await
+            .map_err(|source| ServiceError::Rpc {
+                operation: "list worker deployments",
+                source,
+            })?
+            .into_inner();
+        Ok(WorkerDeploymentPage {
+            deployments: response
+                .worker_deployments
+                .iter()
+                .map(worker_deployment_summary)
+                .collect(),
+            next_page_token: response.next_page_token,
+        })
+    }
+
+    async fn describe_worker_deployment(
+        &self,
+        namespace: &str,
+        name: &str,
+    ) -> Result<WorkerDeploymentDetails, ServiceError> {
+        let mut service = self.connection.workflow_service();
+        let response = service
+            .describe_worker_deployment(
+                DescribeWorkerDeploymentRequest {
+                    namespace: namespace.to_string(),
+                    deployment_name: name.to_string(),
+                }
+                .into_request(),
+            )
+            .await
+            .map_err(|source| ServiceError::Rpc {
+                operation: "describe worker deployment",
+                source,
+            })?
+            .into_inner();
+        let info = response
+            .worker_deployment_info
+            .ok_or_else(|| ServiceError::Client {
+                operation: "describe worker deployment",
+                message: "response did not include deployment information".to_string(),
+            })?;
+        Ok(worker_deployment_details(&info))
     }
 
     async fn cancel_workflow(
@@ -542,17 +1263,30 @@ impl TemporalService for GrpcTemporalService {
     ) -> Result<(), ServiceError> {
         let converter = PayloadConverter::serde_json();
         let input = RawValue::from_value(&input, &converter);
-        self.workflow_handle(namespace, key)?
-            .signal(
-                UntypedSignal::<UntypedWorkflow>::new(signal_name),
-                input,
-                WorkflowSignalOptions::default(),
+        let payloads = self.encode_payloads(namespace, input.payloads).await?;
+        let mut service = self.connection.workflow_service();
+        service
+            .signal_workflow_execution(
+                SignalWorkflowExecutionRequest {
+                    namespace: namespace.to_string(),
+                    workflow_execution: Some(ProtoWorkflowExecution {
+                        workflow_id: key.workflow_id.clone(),
+                        run_id: key.run_id.clone(),
+                    }),
+                    signal_name: signal_name.to_string(),
+                    input: Some(Payloads { payloads }),
+                    identity: client_identity(),
+                    request_id: operation_request_id(),
+                    ..Default::default()
+                }
+                .into_request(),
             )
             .await
-            .map_err(|error| ServiceError::Client {
-                operation: "signal workflow",
-                message: error.to_string(),
+            .map_err(|source| ServiceError::Rpc {
+                operation: "signal workflow execution",
+                source,
             })
+            .map(|_| ())
     }
 }
 
@@ -613,6 +1347,284 @@ fn namespace_summary(namespace: DescribeNamespaceResponse) -> NamespaceSummary {
         active_cluster: replication.active_cluster_name,
         is_global: namespace.is_global_namespace,
     }
+}
+
+fn task_queue_summary(
+    name: String,
+    queue_type: TaskQueueType,
+    response: &DescribeTaskQueueResponse,
+) -> TaskQueueSummary {
+    let versioning = response.versioning_info.as_ref();
+    TaskQueueSummary {
+        name,
+        queue_type,
+        pollers: response
+            .pollers
+            .iter()
+            .map(|poller| {
+                let deployment = poller.deployment_options.as_ref();
+                PollerSummary {
+                    identity: poller.identity.clone(),
+                    last_access_time: poller.last_access_time.as_ref().and_then(proto_datetime),
+                    rate_per_second: poller.rate_per_second,
+                    deployment_name: deployment
+                        .map(|options| options.deployment_name.clone())
+                        .unwrap_or_default(),
+                    build_id: deployment
+                        .map(|options| options.build_id.clone())
+                        .unwrap_or_default(),
+                }
+            })
+            .collect(),
+        stats: response
+            .stats
+            .as_ref()
+            .map_or_else(TaskQueueStats::default, task_queue_stats),
+        current_deployment: versioning
+            .and_then(|info| info.current_deployment_version.as_ref())
+            .map(deployment_version),
+        ramping_deployment: versioning
+            .and_then(|info| info.ramping_deployment_version.as_ref())
+            .map(deployment_version),
+        ramping_percentage: versioning.map_or(0.0, |info| info.ramping_version_percentage),
+        effective_rate_limit: response
+            .effective_rate_limit
+            .as_ref()
+            .map(|limit| limit.requests_per_second),
+    }
+}
+
+fn task_queue_stats(stats: &ProtoTaskQueueStats) -> TaskQueueStats {
+    TaskQueueStats {
+        approximate_backlog_count: stats.approximate_backlog_count,
+        approximate_backlog_age_seconds: stats
+            .approximate_backlog_age
+            .as_ref()
+            .map_or(0.0, duration_seconds),
+        tasks_add_rate: stats.tasks_add_rate,
+        tasks_dispatch_rate: stats.tasks_dispatch_rate,
+    }
+}
+
+fn worker_summary(worker: &WorkerListInfo) -> WorkerSummary {
+    WorkerSummary {
+        instance_key: worker.worker_instance_key.clone(),
+        identity: worker.worker_identity.clone(),
+        task_queue: worker.task_queue.clone(),
+        deployment: worker.deployment_version.as_ref().map(deployment_version),
+        sdk_name: worker.sdk_name.clone(),
+        sdk_version: worker.sdk_version.clone(),
+        status: enum_label::<WorkerStatus>(worker.status),
+        start_time: worker.start_time.as_ref().and_then(proto_datetime),
+        host_name: worker.host_name.clone(),
+        process_id: worker.process_id.clone(),
+        plugins: worker
+            .plugins
+            .iter()
+            .map(|plugin| {
+                if plugin.version.is_empty() {
+                    plugin.name.clone()
+                } else {
+                    format!("{}@{}", plugin.name, plugin.version)
+                }
+            })
+            .collect(),
+    }
+}
+
+fn worker_summary_from_heartbeat(worker: &WorkerHeartbeat) -> WorkerSummary {
+    let host = worker.host_info.as_ref();
+    WorkerSummary {
+        instance_key: worker.worker_instance_key.clone(),
+        identity: worker.worker_identity.clone(),
+        task_queue: worker.task_queue.clone(),
+        deployment: worker.deployment_version.as_ref().map(deployment_version),
+        sdk_name: worker.sdk_name.clone(),
+        sdk_version: worker.sdk_version.clone(),
+        status: enum_label::<WorkerStatus>(worker.status),
+        start_time: worker.start_time.as_ref().and_then(proto_datetime),
+        host_name: host.map(|host| host.host_name.clone()).unwrap_or_default(),
+        process_id: host.map(|host| host.process_id.clone()).unwrap_or_default(),
+        plugins: worker
+            .plugins
+            .iter()
+            .map(|plugin| {
+                if plugin.version.is_empty() {
+                    plugin.name.clone()
+                } else {
+                    format!("{}@{}", plugin.name, plugin.version)
+                }
+            })
+            .collect(),
+    }
+}
+
+fn worker_details(worker: &WorkerHeartbeat) -> WorkerDetails {
+    let host = worker.host_info.as_ref();
+    WorkerDetails {
+        summary: worker_summary_from_heartbeat(worker),
+        heartbeat_time: worker.heartbeat_time.as_ref().and_then(proto_datetime),
+        elapsed_since_heartbeat_seconds: worker
+            .elapsed_since_last_heartbeat
+            .as_ref()
+            .map_or(0.0, duration_seconds),
+        host_cpu_usage: host.map_or(0.0, |host| host.current_host_cpu_usage),
+        host_memory_usage: host.map_or(0.0, |host| host.current_host_mem_usage),
+        workflow_slots: worker
+            .workflow_task_slots_info
+            .as_ref()
+            .map_or_else(WorkerSlots::default, worker_slots),
+        activity_slots: worker
+            .activity_task_slots_info
+            .as_ref()
+            .map_or_else(WorkerSlots::default, worker_slots),
+        local_activity_slots: worker
+            .local_activity_slots_info
+            .as_ref()
+            .map_or_else(WorkerSlots::default, worker_slots),
+        nexus_slots: worker
+            .nexus_task_slots_info
+            .as_ref()
+            .map_or_else(WorkerSlots::default, worker_slots),
+        workflow_pollers: worker
+            .workflow_poller_info
+            .as_ref()
+            .map_or(0, |poller| poller.current_pollers),
+        activity_pollers: worker
+            .activity_poller_info
+            .as_ref()
+            .map_or(0, |poller| poller.current_pollers),
+        nexus_pollers: worker
+            .nexus_poller_info
+            .as_ref()
+            .map_or(0, |poller| poller.current_pollers),
+        sticky_cache_hits: worker.total_sticky_cache_hit,
+        sticky_cache_misses: worker.total_sticky_cache_miss,
+        sticky_cache_size: worker.current_sticky_cache_size,
+    }
+}
+
+fn worker_slots(slots: &WorkerSlotsInfo) -> WorkerSlots {
+    WorkerSlots {
+        available: slots.current_available_slots,
+        used: slots.current_used_slots,
+        supplier: slots.slot_supplier_kind.clone(),
+        processed: slots.total_processed_tasks,
+        failed: slots.total_failed_tasks,
+    }
+}
+
+fn worker_deployment_summary(
+    deployment: &list_worker_deployments_response::WorkerDeploymentSummary,
+) -> WorkerDeploymentSummary {
+    let routing = deployment.routing_config.as_ref();
+    WorkerDeploymentSummary {
+        name: deployment.name.clone(),
+        create_time: deployment.create_time.as_ref().and_then(proto_datetime),
+        current_version: routing
+            .and_then(|value| value.current_deployment_version.as_ref())
+            .map(deployment_version),
+        ramping_version: routing
+            .and_then(|value| value.ramping_deployment_version.as_ref())
+            .map(deployment_version),
+        ramping_percentage: routing.map_or(0.0, |value| value.ramping_version_percentage),
+        latest_version: deployment
+            .latest_version_summary
+            .as_ref()
+            .and_then(|version| version.deployment_version.as_ref())
+            .map(deployment_version),
+    }
+}
+
+fn worker_deployment_details(info: &ProtoWorkerDeploymentInfo) -> WorkerDeploymentDetails {
+    let routing = info.routing_config.as_ref();
+    let current_version = routing
+        .and_then(|value| value.current_deployment_version.as_ref())
+        .map(deployment_version);
+    let ramping_version = routing
+        .and_then(|value| value.ramping_deployment_version.as_ref())
+        .map(deployment_version);
+    let latest_version = info
+        .version_summaries
+        .iter()
+        .max_by_key(|version| version.create_time.as_ref().map(timestamp_key))
+        .and_then(|version| version.deployment_version.as_ref())
+        .map(deployment_version);
+    let summary = WorkerDeploymentSummary {
+        name: info.name.clone(),
+        create_time: info.create_time.as_ref().and_then(proto_datetime),
+        current_version: current_version.clone(),
+        ramping_version: ramping_version.clone(),
+        ramping_percentage: routing.map_or(0.0, |value| value.ramping_version_percentage),
+        latest_version,
+    };
+    let versions = info
+        .version_summaries
+        .iter()
+        .filter_map(|version| {
+            let deployment = version
+                .deployment_version
+                .as_ref()
+                .map(deployment_version)?;
+            let is_current = current_version.as_ref() == Some(&deployment);
+            let is_ramping = ramping_version.as_ref() == Some(&deployment);
+            Some(DeploymentVersionSummary {
+                version: deployment,
+                status: enum_label::<WorkerDeploymentVersionStatus>(version.status),
+                create_time: version.create_time.as_ref().and_then(proto_datetime),
+                is_current,
+                is_ramping,
+                ramp_percentage: if is_ramping {
+                    summary.ramping_percentage
+                } else {
+                    0.0
+                },
+                drainage_status: version.drainage_info.as_ref().map_or_else(
+                    || "UNSPECIFIED".to_string(),
+                    |drainage| enum_label::<VersionDrainageStatus>(drainage.status),
+                ),
+                drainage_last_checked: version
+                    .drainage_info
+                    .as_ref()
+                    .and_then(|drainage| drainage.last_checked_time.as_ref())
+                    .and_then(proto_datetime),
+            })
+        })
+        .collect();
+    WorkerDeploymentDetails {
+        summary,
+        versions,
+        manager_identity: info.manager_identity.clone(),
+        last_modifier_identity: info.last_modifier_identity.clone(),
+        routing_update_state: enum_label::<RoutingConfigUpdateState>(
+            info.routing_config_update_state,
+        ),
+    }
+}
+
+fn deployment_version(version: &ProtoDeploymentVersion) -> DeploymentVersion {
+    DeploymentVersion {
+        deployment_name: version.deployment_name.clone(),
+        build_id: version.build_id.clone(),
+    }
+}
+
+fn enum_label<Enum>(raw: i32) -> String
+where
+    Enum: TryFrom<i32> + std::fmt::Debug,
+{
+    Enum::try_from(raw).map_or_else(
+        |_| format!("UNKNOWN ({raw})"),
+        |value| prettify_debug_name(&format!("{value:?}")),
+    )
+}
+
+fn timestamp_key(timestamp: &prost_wkt_types::Timestamp) -> (i64, i32) {
+    (timestamp.seconds, timestamp.nanos)
+}
+
+fn duration_seconds(duration: &prost_wkt_types::Duration) -> f64 {
+    std::time::Duration::try_from(*duration).map_or(0.0, |value| value.as_secs_f64())
 }
 
 fn history_event_summary(event: &HistoryEvent) -> HistoryEventSummary {
@@ -862,6 +1874,22 @@ fn payload_field(name: impl Into<String>, payload: &Payload) -> StructuredField 
     }
 }
 
+fn payload_display_text(payload: &Payload) -> Option<String> {
+    if payload.data.is_empty() {
+        return None;
+    }
+    let encoding = payload
+        .metadata
+        .get("encoding")
+        .and_then(|value| std::str::from_utf8(value).ok());
+    if matches!(encoding, Some("json/plain" | "json/protobuf"))
+        && let Ok(Value::String(value)) = serde_json::from_slice::<Value>(&payload.data)
+    {
+        return Some(truncate_text(&value, 20_000));
+    }
+    Some(payload_field("user metadata", payload).value)
+}
+
 fn redact_json_value(value: &mut Value) -> bool {
     match value {
         Value::Object(object) => {
@@ -982,6 +2010,13 @@ fn client_identity() -> String {
     format!("temporal-tui@{host}-{}", std::process::id())
 }
 
+fn operation_request_id() -> String {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_nanos());
+    format!("temporal-tui-{}-{nanos}", std::process::id())
+}
+
 async fn load_tls_options(config: ClientTlsConfig) -> Result<TlsOptions, ServiceError> {
     let server_root_ca_cert = read_optional(config.server_ca, "server CA certificate").await?;
     let client_cert = read_optional(config.client_certificate, "client certificate").await?;
@@ -1017,11 +2052,28 @@ async fn read_optional(
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        io::{Read, Write},
+        net::TcpListener,
+        sync::mpsc,
+        thread,
+    };
+
     use super::*;
     use prost_wkt_types;
     use temporalio_common::protos::temporal::api::{
         common::v1::{ActivityType, WorkflowExecution, WorkflowType},
+        deployment::v1::{
+            RoutingConfig, VersionDrainageInfo, WorkerDeploymentOptions, WorkerDeploymentVersion,
+            worker_deployment_info::WorkerDeploymentVersionSummary,
+        },
+        enums::v1::{
+            RoutingConfigUpdateState, VersionDrainageStatus, WorkerDeploymentVersionStatus,
+            WorkerStatus,
+        },
         history::v1::ActivityTaskScheduledEventAttributes,
+        taskqueue::v1::{PollerInfo, TaskQueueVersioningInfo},
+        worker::v1::{WorkerHostInfo, WorkerPollerInfo},
     };
 
     #[test]
@@ -1119,5 +2171,301 @@ mod tests {
         assert!(field.value.contains("Ada"));
         assert!(field.value.contains("<redacted>"));
         assert!(!field.value.contains("do-not-export"));
+    }
+
+    #[test]
+    fn maps_task_queue_backlog_pollers_and_routing() {
+        let response = DescribeTaskQueueResponse {
+            pollers: vec![PollerInfo {
+                identity: "worker-a".to_string(),
+                rate_per_second: 12.5,
+                deployment_options: Some(WorkerDeploymentOptions {
+                    deployment_name: "payments".to_string(),
+                    build_id: "2026.07.28".to_string(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }],
+            stats: Some(ProtoTaskQueueStats {
+                approximate_backlog_count: 7,
+                approximate_backlog_age: Some(prost_wkt_types::Duration {
+                    seconds: 12,
+                    nanos: 500_000_000,
+                }),
+                tasks_add_rate: 4.5,
+                tasks_dispatch_rate: 3.0,
+            }),
+            versioning_info: Some(TaskQueueVersioningInfo {
+                current_deployment_version: Some(WorkerDeploymentVersion {
+                    deployment_name: "payments".to_string(),
+                    build_id: "v1".to_string(),
+                }),
+                ramping_deployment_version: Some(WorkerDeploymentVersion {
+                    deployment_name: "payments".to_string(),
+                    build_id: "v2".to_string(),
+                }),
+                ramping_version_percentage: 15.0,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let summary = task_queue_summary(
+            "payments-tasks".to_string(),
+            TaskQueueType::Activity,
+            &response,
+        );
+        assert_eq!(summary.name, "payments-tasks");
+        assert_eq!(summary.queue_type, TaskQueueType::Activity);
+        assert_eq!(summary.pollers[0].identity, "worker-a");
+        assert_eq!(summary.pollers[0].deployment_name, "payments");
+        assert_eq!(summary.stats.approximate_backlog_count, 7);
+        assert!((summary.stats.approximate_backlog_age_seconds - 12.5).abs() < f64::EPSILON);
+        assert_eq!(summary.current_deployment.unwrap().build_id, "v1");
+        assert_eq!(summary.ramping_deployment.unwrap().build_id, "v2");
+        assert!((summary.ramping_percentage - 15.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn maps_worker_heartbeat_resource_and_slot_diagnostics() {
+        let heartbeat = WorkerHeartbeat {
+            worker_instance_key: "instance-a".to_string(),
+            worker_identity: "worker-a".to_string(),
+            task_queue: "payments".to_string(),
+            sdk_name: "temporal-sdk-rust".to_string(),
+            sdk_version: "0.2.0".to_string(),
+            status: WorkerStatus::Running as i32,
+            host_info: Some(WorkerHostInfo {
+                host_name: "worker-host".to_string(),
+                process_id: "4242".to_string(),
+                current_host_cpu_usage: 0.25,
+                current_host_mem_usage: 0.5,
+                ..Default::default()
+            }),
+            elapsed_since_last_heartbeat: Some(prost_wkt_types::Duration {
+                seconds: 3,
+                nanos: 250_000_000,
+            }),
+            workflow_task_slots_info: Some(WorkerSlotsInfo {
+                current_available_slots: 8,
+                current_used_slots: 2,
+                slot_supplier_kind: "Fixed".to_string(),
+                total_processed_tasks: 100,
+                total_failed_tasks: 1,
+                ..Default::default()
+            }),
+            workflow_poller_info: Some(WorkerPollerInfo {
+                current_pollers: 4,
+                ..Default::default()
+            }),
+            total_sticky_cache_hit: 30,
+            total_sticky_cache_miss: 2,
+            current_sticky_cache_size: 12,
+            ..Default::default()
+        };
+
+        let details = worker_details(&heartbeat);
+        assert_eq!(details.summary.instance_key, "instance-a");
+        assert_eq!(details.summary.status, "RUNNING");
+        assert_eq!(details.summary.host_name, "worker-host");
+        assert!((details.elapsed_since_heartbeat_seconds - 3.25).abs() < f64::EPSILON);
+        assert!((details.host_cpu_usage - 0.25).abs() < f32::EPSILON);
+        assert!((details.host_memory_usage - 0.5).abs() < f32::EPSILON);
+        assert_eq!(details.workflow_slots.available, 8);
+        assert_eq!(details.workflow_slots.processed, 100);
+        assert_eq!(details.workflow_pollers, 4);
+        assert_eq!(details.sticky_cache_hits, 30);
+    }
+
+    #[test]
+    fn maps_worker_deployment_routing_and_drainage() {
+        let current = WorkerDeploymentVersion {
+            deployment_name: "payments".to_string(),
+            build_id: "v1".to_string(),
+        };
+        let inactive = WorkerDeploymentVersion {
+            deployment_name: "payments".to_string(),
+            build_id: "v2".to_string(),
+        };
+        let info = ProtoWorkerDeploymentInfo {
+            name: "payments".to_string(),
+            version_summaries: vec![
+                WorkerDeploymentVersionSummary {
+                    status: WorkerDeploymentVersionStatus::Current as i32,
+                    deployment_version: Some(current.clone()),
+                    create_time: Some(prost_wkt_types::Timestamp {
+                        seconds: 10,
+                        nanos: 0,
+                    }),
+                    ..Default::default()
+                },
+                WorkerDeploymentVersionSummary {
+                    status: WorkerDeploymentVersionStatus::Drained as i32,
+                    deployment_version: Some(inactive),
+                    create_time: Some(prost_wkt_types::Timestamp {
+                        seconds: 20,
+                        nanos: 0,
+                    }),
+                    drainage_info: Some(VersionDrainageInfo {
+                        status: VersionDrainageStatus::Drained as i32,
+                        last_checked_time: Some(prost_wkt_types::Timestamp {
+                            seconds: 30,
+                            nanos: 0,
+                        }),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+            ],
+            routing_config: Some(RoutingConfig {
+                current_deployment_version: Some(current),
+                ..Default::default()
+            }),
+            manager_identity: "release-controller".to_string(),
+            last_modifier_identity: "operator-a".to_string(),
+            routing_config_update_state: RoutingConfigUpdateState::Completed as i32,
+            ..Default::default()
+        };
+
+        let details = worker_deployment_details(&info);
+        assert_eq!(details.summary.name, "payments");
+        assert_eq!(
+            details.summary.current_version.as_ref().unwrap().build_id,
+            "v1"
+        );
+        assert_eq!(
+            details.summary.latest_version.as_ref().unwrap().build_id,
+            "v2"
+        );
+        assert!(details.versions[0].is_current);
+        assert_eq!(details.versions[1].drainage_status, "DRAINED");
+        assert_eq!(details.manager_identity, "release-controller");
+        assert_eq!(details.routing_update_state, "COMPLETED");
+    }
+
+    #[tokio::test]
+    async fn codec_server_uses_temporal_proto_json_and_namespace_routing() {
+        let decoded_data = br#"{"customer":"Ada"}"#;
+        let response = serde_json::json!({
+            "payloads": [{
+                "metadata": {
+                    "encoding": BASE64_STANDARD.encode("json/plain")
+                },
+                "data": BASE64_STANDARD.encode(decoded_data)
+            }]
+        })
+        .to_string();
+        let (endpoint, request, server) = one_shot_http_server(response);
+        let codec = HttpPayloadCodec::new(PayloadCodecConfig {
+            endpoint: format!("{endpoint}/codec/{{namespace}}"),
+            headers: HashMap::from([(
+                "authorization".to_string(),
+                "Bearer test-token".to_string(),
+            )]),
+        })
+        .unwrap();
+        let encrypted = Payload {
+            metadata: HashMap::from([("encoding".to_string(), b"binary/encrypted".to_vec())]),
+            data: b"ciphertext".to_vec(),
+            ..Default::default()
+        };
+
+        let decoded = codec
+            .transform("team one", CodecOperation::Decode, vec![encrypted])
+            .await
+            .unwrap();
+        assert_eq!(decoded.len(), 1);
+        assert_eq!(decoded[0].metadata["encoding"], b"json/plain");
+        assert_eq!(decoded[0].data, decoded_data);
+
+        let request = request.recv_timeout(Duration::from_secs(2)).unwrap();
+        server.join().unwrap();
+        assert!(request.starts_with("POST /codec/team%20one/decode HTTP/1.1\r\n"));
+        let lower = request.to_ascii_lowercase();
+        assert!(lower.contains("\r\nx-namespace: team one\r\n"));
+        assert!(lower.contains("\r\nauthorization: bearer test-token\r\n"));
+        let body = request.split_once("\r\n\r\n").unwrap().1;
+        let body: Value = serde_json::from_str(body).unwrap();
+        assert_eq!(
+            body["payloads"][0]["metadata"]["encoding"],
+            BASE64_STANDARD.encode("binary/encrypted")
+        );
+        assert_eq!(
+            body["payloads"][0]["data"],
+            BASE64_STANDARD.encode("ciphertext")
+        );
+    }
+
+    #[test]
+    fn codec_url_replaces_an_existing_operation_and_rejects_credentials() {
+        let codec = HttpPayloadCodec::new(PayloadCodecConfig {
+            endpoint: "https://codec.example/namespaces/{namespace}/decode".to_string(),
+            headers: HashMap::new(),
+        })
+        .unwrap();
+        assert_eq!(
+            codec
+                .url("payments/prod", CodecOperation::Encode)
+                .unwrap()
+                .as_str(),
+            "https://codec.example/namespaces/payments%2Fprod/encode"
+        );
+        assert!(
+            HttpPayloadCodec::new(PayloadCodecConfig {
+                endpoint: "https://user:secret@codec.example".to_string(),
+                headers: HashMap::new(),
+            })
+            .is_err()
+        );
+    }
+
+    fn one_shot_http_server(
+        response_body: String,
+    ) -> (String, mpsc::Receiver<String>, thread::JoinHandle<()>) {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        let (sender, receiver) = mpsc::channel();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0_u8; 4096];
+            let mut expected_length = None;
+            loop {
+                let count = stream.read(&mut buffer).unwrap();
+                if count == 0 {
+                    break;
+                }
+                request.extend_from_slice(&buffer[..count]);
+                if expected_length.is_none()
+                    && let Some(header_end) =
+                        request.windows(4).position(|window| window == b"\r\n\r\n")
+                {
+                    let headers = String::from_utf8_lossy(&request[..header_end]);
+                    let content_length = headers.lines().find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>().ok())
+                            .flatten()
+                    });
+                    expected_length =
+                        content_length.map(|length| header_end.saturating_add(4 + length));
+                }
+                if expected_length.is_some_and(|length| request.len() >= length) {
+                    break;
+                }
+            }
+            sender.send(String::from_utf8(request).unwrap()).unwrap();
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                response_body.len(),
+                response_body
+            )
+            .unwrap();
+        });
+        (format!("http://{address}"), receiver, server)
     }
 }

@@ -12,6 +12,14 @@ required at runtime.
 - Inspect full paginated history, failure causes and stacks, payloads, memo,
   Search Attributes, pending Activities, and every run in a Workflow chain.
 - Discover and switch namespaces without reconnecting.
+- Diagnose Workflow and Activity Task Queues with backlog size and age,
+  add/dispatch rates, pollers, effective rate limits, and current/ramping
+  Worker Deployment routing. Queue names are discovered from Workflows and
+  heartbeat-enabled Workers, or can be entered directly.
+- Inspect heartbeat-enabled Workers with host CPU/memory, poller counts, slot
+  utilization, task outcomes, sticky-cache health, SDK version, and plugins.
+- Inspect GA Worker Deployments, traffic ramping, routing propagation, and
+  per-version drainage state without using the removed legacy Versioning APIs.
 - Refresh manually or automatically.
 - Use named connection profiles and saved visibility queries.
 - Store API keys in macOS Keychain, Windows Credential Manager, Linux Secret
@@ -24,6 +32,9 @@ required at runtime.
 - Request graceful cancellation or terminate an exact workflow run.
 - Connect to a local cluster, self-hosted Temporal, or Temporal Cloud with API
   key, TLS, mTLS, custom CA, server-name override, and repeated gRPC headers.
+- Decode displayed payloads and encode outgoing signal payloads through a
+  standard Temporal Codec Server. Namespace routing, secret auth headers,
+  response-size limits, timeouts, and redirect blocking are enforced.
 - Restore raw mode, the cursor, and the alternate screen on normal and error
   exits.
 
@@ -120,18 +131,36 @@ temporal-tui filter save failures \
   "ExecutionStatus = 'Failed' AND StartTime > '2026-07-27T00:00:00Z'"
 ```
 
+Configure a Codec Server per profile. The endpoint can include
+`{namespace}`; temporal-tui appends `/encode` or `/decode` and always sends
+`X-Namespace`:
+
+```sh
+temporal-tui profile create encrypted-cloud \
+  --address your-namespace.account.tmprl.cloud:7233 \
+  --namespace your-namespace \
+  --tls \
+  --api-key-env TEMPORAL_API_KEY \
+  --codec-endpoint 'https://codec.example/namespaces/{namespace}' \
+  --codec-auth-env TEMPORAL_CODEC_AUTH
+```
+
+Codec authorization is resolved only at runtime. It is not written to the
+profile or diagnostic exports.
+
 ## Keyboard controls
 
 | Key | Action |
 | --- | --- |
-| `j` / `k`, arrows | Move through workflows or history |
+| `1` / `2` / `3` / `4` | Workflows / Task Queues / Workers / Deployments |
+| `j` / `k`, arrows | Move through the active list or Workflow history |
 | `g` / `G`, home / end | Jump to first or last item |
-| `tab` / `enter` | Switch between workflow and history panes |
-| `/` | Edit the Temporal visibility query |
+| `tab` / `enter` | Switch between Workflow and history panes |
+| `/` | Edit Visibility query, or enter a Task Queue name |
 | `f` | Select a saved visibility query |
 | `#` | Show `GROUP BY` counts |
 | `n` | Switch namespace |
-| `[` / `]` | Previous / next workflow page |
+| `[` / `]` | Previous / next page in the active paginated view |
 | `r` | Refresh now |
 | `a` | Toggle automatic refresh |
 | `H` | Load the next older history page |
@@ -155,8 +184,9 @@ scripts/check.sh
 
 The live contract test starts an ephemeral Temporal dev server and verifies
 cluster discovery, namespaces, visibility cursors and counts, complete history
-pagination, payload redaction, Workflow chains, signal, cancel, and terminate
-through the real gRPC adapter:
+pagination, Task Queue backlog, Worker and Worker Deployment endpoints, payload
+redaction, an encode/decode Codec Server round trip, Workflow chains, signal,
+cancel, and terminate through the real gRPC adapter:
 
 ```sh
 scripts/install-temporal-cli.sh
@@ -173,3 +203,8 @@ produce typed commands, while the Tokio runtime executes those commands through
 a small `TemporalService` boundary. Request IDs suppress stale list, detail, and
 mutation responses. Ratatui `TestBackend` tests cover the dashboard, confirmation
 modal, and small-terminal fallback without requiring a real terminal.
+
+The Worker list/detail surface uses Temporal's experimental heartbeat API and
+is shown as unavailable rather than guessed when a server or SDK does not
+provide heartbeat data. Worker Deployment routing and drainage use the GA APIs
+introduced in Temporal Server 1.31.

@@ -9,8 +9,11 @@ use clap::{Parser, Subcommand};
 
 use crate::{
     app::{AppConfig, SavedQuery},
-    config::{ConfigStore, ConnectionProfile, ProfileTls, SavedFilter, SecretSource, UserConfig},
-    service::{ClientTlsConfig, TemporalConnectionConfig},
+    config::{
+        ConfigStore, ConnectionProfile, ProfilePayloadCodec, ProfileTls, SavedFilter, SecretSource,
+        UserConfig,
+    },
+    service::{ClientTlsConfig, PayloadCodecConfig, TemporalConnectionConfig},
 };
 
 /// Terminal dashboard and control plane for Temporal.
@@ -65,6 +68,18 @@ pub struct Cli {
     #[arg(long = "header", value_parser = parse_header)]
     pub headers: Vec<(String, String)>,
 
+    /// Temporal Codec Server base URL; `{namespace}` is expanded in its path.
+    #[arg(long, env = "TEMPORAL_CODEC_ENDPOINT")]
+    pub codec_endpoint: Option<String>,
+
+    /// Codec Server HTTP header in KEY=VALUE form. May be repeated.
+    #[arg(long = "codec-header", value_parser = parse_header)]
+    pub codec_headers: Vec<(String, String)>,
+
+    /// Codec Server Authorization header. Prefer the environment variable.
+    #[arg(long, env = "TEMPORAL_CODEC_AUTH", hide_env_values = true)]
+    pub codec_auth: Option<String>,
+
     /// Initial Temporal visibility query.
     #[arg(long, short = 'q')]
     pub query: Option<String>,
@@ -99,6 +114,10 @@ pub struct Cli {
 
 /// Non-interactive config administration.
 #[derive(Clone, Subcommand)]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "Clap owns this short-lived command model and direct fields keep generated help coherent"
+)]
 pub enum CliCommand {
     /// Manage connection profiles.
     Profile {
@@ -115,6 +134,10 @@ pub enum CliCommand {
 }
 
 #[derive(Clone, Subcommand)]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "the profile create command intentionally exposes all persisted connection settings"
+)]
 pub enum ProfileCommand {
     /// List configured profiles without resolving secrets.
     List,
@@ -139,6 +162,12 @@ pub enum ProfileCommand {
         tls_server_name: Option<String>,
         #[arg(long = "header", value_parser = parse_header)]
         headers: Vec<(String, String)>,
+        #[arg(long)]
+        codec_endpoint: Option<String>,
+        #[arg(long = "codec-header", value_parser = parse_header)]
+        codec_headers: Vec<(String, String)>,
+        #[arg(long)]
+        codec_auth_env: Option<String>,
         #[arg(long)]
         api_key_env: Option<String>,
         #[arg(long)]
@@ -260,6 +289,7 @@ impl Cli {
                         api_key: None,
                         headers: HashMap::new(),
                         tls: None,
+                        payload_codec: None,
                     },
                     "default".to_string(),
                     Some("http://127.0.0.1:8233".to_string()),
@@ -280,6 +310,31 @@ impl Cli {
                 .is_some()
             {
                 bail!("duplicate gRPC header after merging profile and CLI: {key}");
+            }
+        }
+        if let Some(endpoint) = &self.codec_endpoint {
+            let headers = connection
+                .payload_codec
+                .take()
+                .map_or_else(HashMap::new, |codec| codec.headers);
+            connection.payload_codec = Some(PayloadCodecConfig {
+                endpoint: endpoint.clone(),
+                headers,
+            });
+        }
+        if !self.codec_headers.is_empty() || self.codec_auth.is_some() {
+            let codec = connection.payload_codec.as_mut().context(
+                "--codec-header/--codec-auth requires --codec-endpoint or a profile Codec Server",
+            )?;
+            for (key, value) in &self.codec_headers {
+                if codec.headers.insert(key.clone(), value.clone()).is_some() {
+                    bail!("duplicate Codec Server header after merging profile and CLI: {key}");
+                }
+            }
+            if let Some(authorization) = &self.codec_auth {
+                codec
+                    .headers
+                    .insert("authorization".to_string(), authorization.clone());
             }
         }
 
@@ -331,6 +386,7 @@ impl Cli {
             })
             .collect::<Vec<_>>();
         saved_queries.sort_by(|left, right| left.name.cmp(&right.name));
+        let codec_enabled = connection.payload_codec.is_some();
 
         Ok(LaunchConfig {
             app: AppConfig {
@@ -343,6 +399,7 @@ impl Cli {
                 auto_refresh: !self.no_auto_refresh,
                 color: !self.no_color,
                 read_only: self.read_only || profile_read_only,
+                codec_enabled,
                 web_ui_url,
                 saved_queries,
             },
@@ -392,6 +449,9 @@ fn run_profile_command(
             tls_key,
             tls_server_name,
             headers,
+            codec_endpoint,
+            codec_headers,
+            codec_auth_env,
             api_key_env,
             web_ui_url,
             read_only,
@@ -407,6 +467,36 @@ fn run_profile_command(
                     bail!("duplicate gRPC header: {key}");
                 }
             }
+            if codec_endpoint.is_none() && (!codec_headers.is_empty() || codec_auth_env.is_some()) {
+                bail!("Codec Server headers require --codec-endpoint");
+            }
+            let payload_codec = codec_endpoint
+                .as_ref()
+                .map(|endpoint| {
+                    let mut headers = BTreeMap::new();
+                    for (key, value) in codec_headers {
+                        if headers.insert(key.clone(), value.clone()).is_some() {
+                            bail!("duplicate Codec Server header: {key}");
+                        }
+                    }
+                    let secret_headers =
+                        codec_auth_env
+                            .as_ref()
+                            .map_or_else(BTreeMap::new, |variable| {
+                                BTreeMap::from([(
+                                    "authorization".to_string(),
+                                    SecretSource::Env {
+                                        variable: variable.clone(),
+                                    },
+                                )])
+                            });
+                    Ok::<_, anyhow::Error>(ProfilePayloadCodec {
+                        endpoint: endpoint.clone(),
+                        headers,
+                        secret_headers,
+                    })
+                })
+                .transpose()?;
             config.profiles.insert(
                 name.clone(),
                 ConnectionProfile {
@@ -424,6 +514,7 @@ fn run_profile_command(
                     }),
                     headers: unique_headers,
                     secret_headers: BTreeMap::new(),
+                    payload_codec,
                     web_ui_url: web_ui_url.clone(),
                     read_only: *read_only,
                 },
@@ -650,5 +741,35 @@ mod tests {
         assert_eq!(launch.connection.address, "dev.example:7233");
         assert_eq!(launch.app.namespace, "orders");
         assert!(launch.app.read_only);
+    }
+
+    #[test]
+    fn codec_cli_settings_enable_remote_payload_conversion() {
+        let (_directory, store, config) = empty_store();
+        let cli = Cli::try_parse_from([
+            "temporal-tui",
+            "--codec-endpoint",
+            "http://127.0.0.1:8081/{namespace}",
+            "--codec-header",
+            "x-owner=temporal-tui",
+            "--codec-auth",
+            "Bearer test-token",
+        ])
+        .unwrap();
+        let launch = cli.launch_config(&store, &config).unwrap();
+        let codec = launch.connection.payload_codec.unwrap();
+        assert!(launch.app.codec_enabled);
+        assert_eq!(
+            codec.endpoint,
+            "http://127.0.0.1:8081/{namespace}".to_string()
+        );
+        assert_eq!(
+            codec.headers.get("authorization").map(String::as_str),
+            Some("Bearer test-token")
+        );
+        assert_eq!(
+            codec.headers.get("x-owner").map(String::as_str),
+            Some("temporal-tui")
+        );
     }
 }

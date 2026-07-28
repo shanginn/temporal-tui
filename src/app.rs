@@ -1,12 +1,16 @@
-use std::time::{Duration, Instant};
+use std::{
+    collections::BTreeSet,
+    time::{Duration, Instant},
+};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use serde_json::Value;
 use url::Url;
 
 use crate::model::{
-    ClusterInfo, HistoryPage, NamespaceSummary, WorkflowCount, WorkflowDetails, WorkflowKey,
-    WorkflowPage, WorkflowSummary,
+    ClusterInfo, HistoryPage, NamespaceSummary, TaskQueueSummary, WorkerDeploymentDetails,
+    WorkerDeploymentPage, WorkerDeploymentSummary, WorkerDetails, WorkerPage, WorkerSummary,
+    WorkflowCount, WorkflowDetails, WorkflowKey, WorkflowPage, WorkflowSummary,
 };
 
 /// Named visibility query loaded from the local config.
@@ -18,6 +22,10 @@ pub struct SavedQuery {
 
 /// Startup behavior and presentation preferences.
 #[derive(Debug, Clone)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "independent startup policy flags map directly to explicit CLI settings"
+)]
 pub struct AppConfig {
     pub address: String,
     pub profile_name: Option<String>,
@@ -28,6 +36,7 @@ pub struct AppConfig {
     pub auto_refresh: bool,
     pub color: bool,
     pub read_only: bool,
+    pub codec_enabled: bool,
     pub web_ui_url: Option<String>,
     pub saved_queries: Vec<SavedQuery>,
 }
@@ -37,6 +46,37 @@ pub struct AppConfig {
 pub enum Focus {
     Workflows,
     History,
+}
+
+/// Top-level diagnostics surface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum View {
+    Workflows,
+    TaskQueues,
+    Workers,
+    Deployments,
+}
+
+impl View {
+    #[must_use]
+    pub const fn number(self) -> u8 {
+        match self {
+            Self::Workflows => 1,
+            Self::TaskQueues => 2,
+            Self::Workers => 3,
+            Self::Deployments => 4,
+        }
+    }
+
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Workflows => "WORKFLOWS",
+            Self::TaskQueues => "TASK QUEUES",
+            Self::Workers => "WORKERS",
+            Self::Deployments => "DEPLOYMENTS",
+        }
+    }
 }
 
 /// User-visible notification severity.
@@ -77,6 +117,7 @@ impl ConfirmAction {
 pub enum Overlay {
     Help,
     Query(TextInput),
+    TaskQueue(TextInput),
     SavedQueryPicker {
         selected: usize,
     },
@@ -217,6 +258,34 @@ pub enum Command {
         namespace: String,
         workflow_id: String,
     },
+    LoadTaskQueues {
+        request_id: u64,
+        namespace: String,
+        names: Vec<String>,
+    },
+    LoadWorkers {
+        request_id: u64,
+        namespace: String,
+        query: String,
+        page_size: usize,
+        next_page_token: Vec<u8>,
+    },
+    LoadWorkerDetails {
+        request_id: u64,
+        namespace: String,
+        instance_key: String,
+    },
+    LoadWorkerDeployments {
+        request_id: u64,
+        namespace: String,
+        page_size: usize,
+        next_page_token: Vec<u8>,
+    },
+    LoadWorkerDeploymentDetails {
+        request_id: u64,
+        namespace: String,
+        name: String,
+    },
     Cancel {
         request_id: u64,
         namespace: String,
@@ -280,6 +349,26 @@ pub enum Message {
         request_id: u64,
         result: Result<Vec<WorkflowSummary>, String>,
     },
+    TaskQueuesLoaded {
+        request_id: u64,
+        result: Result<Vec<TaskQueueSummary>, String>,
+    },
+    WorkersLoaded {
+        request_id: u64,
+        result: Result<WorkerPage, String>,
+    },
+    WorkerDetailsLoaded {
+        request_id: u64,
+        result: Result<Box<WorkerDetails>, String>,
+    },
+    WorkerDeploymentsLoaded {
+        request_id: u64,
+        result: Result<WorkerDeploymentPage, String>,
+    },
+    WorkerDeploymentDetailsLoaded {
+        request_id: u64,
+        result: Result<Box<WorkerDeploymentDetails>, String>,
+    },
     OperationFinished {
         request_id: u64,
         operation: OperationKind,
@@ -333,8 +422,10 @@ pub struct App {
     pub auto_refresh: bool,
     pub color: bool,
     pub read_only: bool,
+    pub codec_enabled: bool,
     pub web_ui_url: Option<String>,
     pub saved_queries: Vec<SavedQuery>,
+    pub view: View,
     pub cluster: Option<ClusterInfo>,
     pub namespaces: Vec<NamespaceSummary>,
     pub workflows: Vec<WorkflowSummary>,
@@ -345,6 +436,23 @@ pub struct App {
     pub selected_workflow: usize,
     pub details: Option<WorkflowDetails>,
     pub workflow_chain: Vec<WorkflowSummary>,
+    pub task_queues: Vec<TaskQueueSummary>,
+    pub selected_task_queue: usize,
+    pub task_queues_error: Option<String>,
+    pub workers: Vec<WorkerSummary>,
+    pub selected_worker: usize,
+    pub worker_details: Option<WorkerDetails>,
+    pub workers_error: Option<String>,
+    pub worker_page_number: usize,
+    pub worker_has_previous_page: bool,
+    pub worker_has_next_page: bool,
+    pub worker_deployments: Vec<WorkerDeploymentSummary>,
+    pub selected_worker_deployment: usize,
+    pub worker_deployment_details: Option<WorkerDeploymentDetails>,
+    pub worker_deployments_error: Option<String>,
+    pub deployment_page_number: usize,
+    pub deployment_has_previous_page: bool,
+    pub deployment_has_next_page: bool,
     pub selected_event: usize,
     pub focus: Focus,
     pub overlay: Option<Overlay>,
@@ -353,6 +461,11 @@ pub struct App {
     pub loading_details: bool,
     pub loading_history_page: bool,
     pub loading_chain: bool,
+    pub loading_task_queues: bool,
+    pub loading_workers: bool,
+    pub loading_worker_details: bool,
+    pub loading_worker_deployments: bool,
+    pub loading_worker_deployment_details: bool,
     pub operation_in_flight: bool,
     pub should_quit: bool,
     current_workflow_request: u64,
@@ -360,6 +473,11 @@ pub struct App {
     current_detail_request: u64,
     current_history_request: u64,
     current_chain_request: u64,
+    current_task_queues_request: u64,
+    current_workers_request: u64,
+    current_worker_details_request: u64,
+    current_worker_deployments_request: u64,
+    current_worker_deployment_details_request: u64,
     current_namespace_request: u64,
     current_operation_request: u64,
     current_utility_request: u64,
@@ -367,6 +485,13 @@ pub struct App {
     current_page_token: Vec<u8>,
     next_page_token: Vec<u8>,
     previous_page_tokens: Vec<Vec<u8>>,
+    worker_current_page_token: Vec<u8>,
+    worker_next_page_token: Vec<u8>,
+    worker_previous_page_tokens: Vec<Vec<u8>>,
+    deployment_current_page_token: Vec<u8>,
+    deployment_next_page_token: Vec<u8>,
+    deployment_previous_page_tokens: Vec<Vec<u8>>,
+    manual_task_queue_names: BTreeSet<String>,
     last_refresh_started: Instant,
 }
 
@@ -383,8 +508,10 @@ impl App {
             auto_refresh: config.auto_refresh,
             color: config.color,
             read_only: config.read_only,
+            codec_enabled: config.codec_enabled,
             web_ui_url: config.web_ui_url,
             saved_queries: config.saved_queries,
+            view: View::Workflows,
             cluster: None,
             namespaces: Vec::new(),
             workflows: Vec::new(),
@@ -395,6 +522,23 @@ impl App {
             selected_workflow: 0,
             details: None,
             workflow_chain: Vec::new(),
+            task_queues: Vec::new(),
+            selected_task_queue: 0,
+            task_queues_error: None,
+            workers: Vec::new(),
+            selected_worker: 0,
+            worker_details: None,
+            workers_error: None,
+            worker_page_number: 1,
+            worker_has_previous_page: false,
+            worker_has_next_page: false,
+            worker_deployments: Vec::new(),
+            selected_worker_deployment: 0,
+            worker_deployment_details: None,
+            worker_deployments_error: None,
+            deployment_page_number: 1,
+            deployment_has_previous_page: false,
+            deployment_has_next_page: false,
             selected_event: 0,
             focus: Focus::Workflows,
             overlay: None,
@@ -403,6 +547,11 @@ impl App {
             loading_details: false,
             loading_history_page: false,
             loading_chain: false,
+            loading_task_queues: false,
+            loading_workers: false,
+            loading_worker_details: false,
+            loading_worker_deployments: false,
+            loading_worker_deployment_details: false,
             operation_in_flight: false,
             should_quit: false,
             current_workflow_request: 0,
@@ -410,6 +559,11 @@ impl App {
             current_detail_request: 0,
             current_history_request: 0,
             current_chain_request: 0,
+            current_task_queues_request: 0,
+            current_workers_request: 0,
+            current_worker_details_request: 0,
+            current_worker_deployments_request: 0,
+            current_worker_deployment_details_request: 0,
             current_namespace_request: 0,
             current_operation_request: 0,
             current_utility_request: 0,
@@ -417,6 +571,13 @@ impl App {
             current_page_token: Vec::new(),
             next_page_token: Vec::new(),
             previous_page_tokens: Vec::new(),
+            worker_current_page_token: Vec::new(),
+            worker_next_page_token: Vec::new(),
+            worker_previous_page_tokens: Vec::new(),
+            deployment_current_page_token: Vec::new(),
+            deployment_next_page_token: Vec::new(),
+            deployment_previous_page_tokens: Vec::new(),
+            manual_task_queue_names: BTreeSet::new(),
             last_refresh_started: Instant::now(),
         }
     }
@@ -564,6 +725,132 @@ impl App {
                 }
                 Vec::new()
             }
+            Message::TaskQueuesLoaded { request_id, result } => {
+                if request_id != self.current_task_queues_request {
+                    return Vec::new();
+                }
+                self.loading_task_queues = false;
+                match result {
+                    Ok(task_queues) => {
+                        let previous = self
+                            .task_queues
+                            .get(self.selected_task_queue)
+                            .map(|queue| (queue.name.clone(), queue.queue_type));
+                        self.task_queues = task_queues;
+                        self.selected_task_queue = previous
+                            .and_then(|key| {
+                                self.task_queues
+                                    .iter()
+                                    .position(|queue| (queue.name.clone(), queue.queue_type) == key)
+                            })
+                            .unwrap_or(0)
+                            .min(self.task_queues.len().saturating_sub(1));
+                        self.task_queues_error = None;
+                    }
+                    Err(error) => {
+                        self.task_queues_error = Some(error.clone());
+                        self.show_notice(error, NoticeKind::Error);
+                    }
+                }
+                Vec::new()
+            }
+            Message::WorkersLoaded { request_id, result } => {
+                if request_id != self.current_workers_request {
+                    return Vec::new();
+                }
+                self.loading_workers = false;
+                match result {
+                    Ok(page) => {
+                        let previous = self
+                            .workers
+                            .get(self.selected_worker)
+                            .map(|worker| worker.instance_key.clone());
+                        self.worker_next_page_token = page.next_page_token;
+                        self.worker_has_previous_page =
+                            !self.worker_previous_page_tokens.is_empty();
+                        self.worker_has_next_page = !self.worker_next_page_token.is_empty();
+                        self.worker_page_number = self.worker_previous_page_tokens.len() + 1;
+                        self.workers = page.workers;
+                        self.selected_worker = previous
+                            .and_then(|key| {
+                                self.workers
+                                    .iter()
+                                    .position(|worker| worker.instance_key == key)
+                            })
+                            .unwrap_or(0)
+                            .min(self.workers.len().saturating_sub(1));
+                        self.worker_details = None;
+                        self.workers_error = None;
+                        self.load_selected_worker_details().into_iter().collect()
+                    }
+                    Err(error) => {
+                        self.workers_error = Some(error.clone());
+                        self.show_notice(error, NoticeKind::Error);
+                        Vec::new()
+                    }
+                }
+            }
+            Message::WorkerDetailsLoaded { request_id, result } => {
+                if request_id != self.current_worker_details_request {
+                    return Vec::new();
+                }
+                self.loading_worker_details = false;
+                match result {
+                    Ok(details) => self.worker_details = Some(*details),
+                    Err(error) => self.show_notice(error, NoticeKind::Error),
+                }
+                Vec::new()
+            }
+            Message::WorkerDeploymentsLoaded { request_id, result } => {
+                if request_id != self.current_worker_deployments_request {
+                    return Vec::new();
+                }
+                self.loading_worker_deployments = false;
+                match result {
+                    Ok(page) => {
+                        let previous = self
+                            .worker_deployments
+                            .get(self.selected_worker_deployment)
+                            .map(|deployment| deployment.name.clone());
+                        self.deployment_next_page_token = page.next_page_token;
+                        self.deployment_has_previous_page =
+                            !self.deployment_previous_page_tokens.is_empty();
+                        self.deployment_has_next_page = !self.deployment_next_page_token.is_empty();
+                        self.deployment_page_number =
+                            self.deployment_previous_page_tokens.len() + 1;
+                        self.worker_deployments = page.deployments;
+                        self.selected_worker_deployment = previous
+                            .and_then(|name| {
+                                self.worker_deployments
+                                    .iter()
+                                    .position(|deployment| deployment.name == name)
+                            })
+                            .unwrap_or(0)
+                            .min(self.worker_deployments.len().saturating_sub(1));
+                        self.worker_deployment_details = None;
+                        self.worker_deployments_error = None;
+                        self.load_selected_worker_deployment_details()
+                            .into_iter()
+                            .collect()
+                    }
+                    Err(error) => {
+                        self.worker_deployments_error = Some(error.clone());
+                        self.show_notice(error, NoticeKind::Error);
+                        Vec::new()
+                    }
+                }
+            }
+            Message::WorkerDeploymentDetailsLoaded { request_id, result } => {
+                if request_id != self.current_worker_deployment_details_request {
+                    return Vec::new();
+                }
+                self.loading_worker_deployment_details = false;
+                match result {
+                    Ok(details) => self.worker_deployment_details = Some(*details),
+                    Err(error) => self.show_notice(error, NoticeKind::Error),
+                }
+                Vec::new()
+            }
             Message::OperationFinished {
                 request_id,
                 operation,
@@ -618,10 +905,10 @@ impl App {
             self.notice = None;
         }
         if self.auto_refresh
-            && !self.loading_workflows
+            && !self.current_view_is_loading()
             && now.duration_since(self.last_refresh_started) >= self.refresh_interval
         {
-            return self.refresh_workflows(false);
+            return self.refresh_current_view(false);
         }
         Vec::new()
     }
@@ -643,17 +930,24 @@ impl App {
         match key.code {
             KeyCode::Char('q') => self.should_quit = true,
             KeyCode::Char('?') => self.overlay = Some(Overlay::Help),
-            KeyCode::Char('/') => {
+            KeyCode::Char('1') => return self.switch_view(View::Workflows),
+            KeyCode::Char('2') => return self.switch_view(View::TaskQueues),
+            KeyCode::Char('3') => return self.switch_view(View::Workers),
+            KeyCode::Char('4') => return self.switch_view(View::Deployments),
+            KeyCode::Char('/') if self.view == View::Workflows => {
                 self.overlay = Some(Overlay::Query(TextInput::new(self.query.clone())));
             }
-            KeyCode::Char('f') => {
+            KeyCode::Char('/') if self.view == View::TaskQueues => {
+                self.overlay = Some(Overlay::TaskQueue(TextInput::default()));
+            }
+            KeyCode::Char('f') if self.view == View::Workflows => {
                 if self.saved_queries.is_empty() {
                     self.show_notice("No saved visibility queries", NoticeKind::Info);
                 } else {
                     self.overlay = Some(Overlay::SavedQueryPicker { selected: 0 });
                 }
             }
-            KeyCode::Char('#') => {
+            KeyCode::Char('#') if self.view == View::Workflows => {
                 if self
                     .workflow_count
                     .as_ref()
@@ -676,7 +970,7 @@ impl App {
                     });
                 }
             }
-            KeyCode::Char('r') => return self.refresh_workflows(false),
+            KeyCode::Char('r') => return self.refresh_current_view(false),
             KeyCode::Char('a') => {
                 self.auto_refresh = !self.auto_refresh;
                 let state = if self.auto_refresh {
@@ -686,22 +980,34 @@ impl App {
                 };
                 self.show_notice(format!("Auto-refresh {state}"), NoticeKind::Info);
             }
-            KeyCode::Char('c') => self.open_confirmation(ConfirmAction::Cancel),
-            KeyCode::Char('x') => self.open_confirmation(ConfirmAction::Terminate),
-            KeyCode::Char('s') => self.open_signal(),
-            KeyCode::Char('[') => return self.previous_workflow_page(),
-            KeyCode::Char(']') => return self.next_workflow_page(),
-            KeyCode::Char('H') => return self.load_older_history(),
-            KeyCode::Char('C') => return self.load_workflow_chain(),
-            KeyCode::Char('v') => {
+            KeyCode::Char('c') if self.view == View::Workflows => {
+                self.open_confirmation(ConfirmAction::Cancel);
+            }
+            KeyCode::Char('x') if self.view == View::Workflows => {
+                self.open_confirmation(ConfirmAction::Terminate);
+            }
+            KeyCode::Char('s') if self.view == View::Workflows => self.open_signal(),
+            KeyCode::Char('[') => return self.previous_page(),
+            KeyCode::Char(']') => return self.next_page(),
+            KeyCode::Char('H') if self.view == View::Workflows => {
+                return self.load_older_history();
+            }
+            KeyCode::Char('C') if self.view == View::Workflows => {
+                return self.load_workflow_chain();
+            }
+            KeyCode::Char('v') if self.view == View::Workflows => {
                 if self.details.is_some() {
                     self.overlay = Some(Overlay::Inspector { scroll: 0 });
                 }
             }
-            KeyCode::Char('y') => return self.copy_workflow_identity(),
-            KeyCode::Char('e') => return self.export_workflow(),
-            KeyCode::Char('o') => return self.open_in_web_ui(),
-            KeyCode::Tab | KeyCode::Enter => {
+            KeyCode::Char('y') if self.view == View::Workflows => {
+                return self.copy_workflow_identity();
+            }
+            KeyCode::Char('e') if self.view == View::Workflows => return self.export_workflow(),
+            KeyCode::Char('o') if self.view == View::Workflows => {
+                return self.open_in_web_ui();
+            }
+            KeyCode::Tab | KeyCode::Enter if self.view == View::Workflows => {
                 self.focus = match self.focus {
                     Focus::Workflows if self.details.is_some() => Focus::History,
                     _ => Focus::Workflows,
@@ -734,6 +1040,20 @@ impl App {
                 KeyCode::Enter => {
                     self.query = input.value.trim().to_string();
                     return self.refresh_workflows(true);
+                }
+                _ => edit_text(input, key),
+            },
+            Overlay::TaskQueue(input) => match key.code {
+                KeyCode::Esc => return Vec::new(),
+                KeyCode::Enter => {
+                    let name = input.value.trim();
+                    if name.is_empty() {
+                        self.show_notice("Task Queue name must not be empty", NoticeKind::Error);
+                        self.overlay = Some(overlay);
+                        return Vec::new();
+                    }
+                    self.manual_task_queue_names.insert(name.to_string());
+                    return self.refresh_task_queues();
                 }
                 _ => edit_text(input, key),
             },
@@ -798,7 +1118,15 @@ impl App {
                         self.details = None;
                         self.selected_workflow = 0;
                         self.selected_event = 0;
-                        return self.refresh_workflows(true);
+                        self.task_queues.clear();
+                        self.workers.clear();
+                        self.worker_details = None;
+                        self.worker_deployments.clear();
+                        self.worker_deployment_details = None;
+                        self.manual_task_queue_names.clear();
+                        self.reset_worker_pagination();
+                        self.reset_deployment_pagination();
+                        return self.refresh_current_view(true);
                     }
                     return Vec::new();
                 }
@@ -926,55 +1254,104 @@ impl App {
     }
 
     fn move_up(&mut self, amount: usize) -> Vec<Command> {
-        match self.focus {
-            Focus::Workflows => {
-                let next = self.selected_workflow.saturating_sub(amount);
-                self.select_workflow(next)
-            }
-            Focus::History => {
-                self.selected_event = self.selected_event.saturating_sub(amount);
+        match self.view {
+            View::Workflows => match self.focus {
+                Focus::Workflows => {
+                    let next = self.selected_workflow.saturating_sub(amount);
+                    self.select_workflow(next)
+                }
+                Focus::History => {
+                    self.selected_event = self.selected_event.saturating_sub(amount);
+                    Vec::new()
+                }
+            },
+            View::TaskQueues => {
+                self.selected_task_queue = self.selected_task_queue.saturating_sub(amount);
                 Vec::new()
+            }
+            View::Workers => {
+                let next = self.selected_worker.saturating_sub(amount);
+                self.select_worker(next)
+            }
+            View::Deployments => {
+                let next = self.selected_worker_deployment.saturating_sub(amount);
+                self.select_worker_deployment(next)
             }
         }
     }
 
     fn move_down(&mut self, amount: usize) -> Vec<Command> {
-        match self.focus {
-            Focus::Workflows => {
-                let next =
-                    (self.selected_workflow + amount).min(self.workflows.len().saturating_sub(1));
-                self.select_workflow(next)
-            }
-            Focus::History => {
-                let last = self
-                    .details
-                    .as_ref()
-                    .map_or(0, |details| details.events.len().saturating_sub(1));
-                self.selected_event = (self.selected_event + amount).min(last);
+        match self.view {
+            View::Workflows => match self.focus {
+                Focus::Workflows => {
+                    let next = (self.selected_workflow + amount)
+                        .min(self.workflows.len().saturating_sub(1));
+                    self.select_workflow(next)
+                }
+                Focus::History => {
+                    let last = self
+                        .details
+                        .as_ref()
+                        .map_or(0, |details| details.events.len().saturating_sub(1));
+                    self.selected_event = (self.selected_event + amount).min(last);
+                    Vec::new()
+                }
+            },
+            View::TaskQueues => {
+                self.selected_task_queue = (self.selected_task_queue + amount)
+                    .min(self.task_queues.len().saturating_sub(1));
                 Vec::new()
+            }
+            View::Workers => {
+                let next =
+                    (self.selected_worker + amount).min(self.workers.len().saturating_sub(1));
+                self.select_worker(next)
+            }
+            View::Deployments => {
+                let next = (self.selected_worker_deployment + amount)
+                    .min(self.worker_deployments.len().saturating_sub(1));
+                self.select_worker_deployment(next)
             }
         }
     }
 
     fn move_first(&mut self) -> Vec<Command> {
-        match self.focus {
-            Focus::Workflows => self.select_workflow(0),
-            Focus::History => {
-                self.selected_event = 0;
+        match self.view {
+            View::Workflows => match self.focus {
+                Focus::Workflows => self.select_workflow(0),
+                Focus::History => {
+                    self.selected_event = 0;
+                    Vec::new()
+                }
+            },
+            View::TaskQueues => {
+                self.selected_task_queue = 0;
                 Vec::new()
             }
+            View::Workers => self.select_worker(0),
+            View::Deployments => self.select_worker_deployment(0),
         }
     }
 
     fn move_last(&mut self) -> Vec<Command> {
-        match self.focus {
-            Focus::Workflows => self.select_workflow(self.workflows.len().saturating_sub(1)),
-            Focus::History => {
-                self.selected_event = self
-                    .details
-                    .as_ref()
-                    .map_or(0, |details| details.events.len().saturating_sub(1));
+        match self.view {
+            View::Workflows => match self.focus {
+                Focus::Workflows => self.select_workflow(self.workflows.len().saturating_sub(1)),
+                Focus::History => {
+                    self.selected_event = self
+                        .details
+                        .as_ref()
+                        .map_or(0, |details| details.events.len().saturating_sub(1));
+                    Vec::new()
+                }
+            },
+            View::TaskQueues => {
+                self.selected_task_queue = self.task_queues.len().saturating_sub(1);
                 Vec::new()
+            }
+            View::Workers => self.select_worker(self.workers.len().saturating_sub(1)),
+            View::Deployments => {
+                self.select_worker_deployment(self.worker_deployments.len().saturating_sub(1))
             }
         }
     }
@@ -987,6 +1364,26 @@ impl App {
         self.details = None;
         self.selected_event = 0;
         self.load_selected_details().into_iter().collect()
+    }
+
+    fn select_worker(&mut self, index: usize) -> Vec<Command> {
+        if self.workers.is_empty() || index == self.selected_worker {
+            return Vec::new();
+        }
+        self.selected_worker = index;
+        self.worker_details = None;
+        self.load_selected_worker_details().into_iter().collect()
+    }
+
+    fn select_worker_deployment(&mut self, index: usize) -> Vec<Command> {
+        if self.worker_deployments.is_empty() || index == self.selected_worker_deployment {
+            return Vec::new();
+        }
+        self.selected_worker_deployment = index;
+        self.worker_deployment_details = None;
+        self.load_selected_worker_deployment_details()
+            .into_iter()
+            .collect()
     }
 
     fn open_confirmation(&mut self, action: ConfirmAction) {
@@ -1044,6 +1441,210 @@ impl App {
             return;
         }
         self.overlay = Some(Overlay::Signal(SignalForm::default()));
+    }
+
+    fn switch_view(&mut self, view: View) -> Vec<Command> {
+        if self.view == view {
+            return Vec::new();
+        }
+        self.view = view;
+        self.overlay = None;
+        match view {
+            View::Workflows if self.workflows.is_empty() => self.refresh_workflows(false),
+            View::TaskQueues => {
+                let mut commands = self.refresh_task_queues();
+                if self.workers.is_empty() && !self.loading_workers {
+                    commands.extend(self.refresh_workers(true));
+                }
+                commands
+            }
+            View::Workers if self.workers.is_empty() => self.refresh_workers(true),
+            View::Deployments if self.worker_deployments.is_empty() => {
+                self.refresh_worker_deployments(true)
+            }
+            View::Workflows | View::Workers | View::Deployments => Vec::new(),
+        }
+    }
+
+    fn refresh_current_view(&mut self, reset_pagination: bool) -> Vec<Command> {
+        match self.view {
+            View::Workflows => self.refresh_workflows(reset_pagination),
+            View::TaskQueues => self.refresh_task_queues(),
+            View::Workers => self.refresh_workers(reset_pagination),
+            View::Deployments => self.refresh_worker_deployments(reset_pagination),
+        }
+    }
+
+    fn current_view_is_loading(&self) -> bool {
+        match self.view {
+            View::Workflows => self.loading_workflows,
+            View::TaskQueues => self.loading_task_queues,
+            View::Workers => self.loading_workers,
+            View::Deployments => self.loading_worker_deployments,
+        }
+    }
+
+    fn known_task_queue_names(&self) -> Vec<String> {
+        self.workflows
+            .iter()
+            .map(|workflow| workflow.task_queue.clone())
+            .chain(self.workers.iter().map(|worker| worker.task_queue.clone()))
+            .filter(|name| !name.is_empty())
+            .chain(self.manual_task_queue_names.iter().cloned())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect()
+    }
+
+    fn refresh_task_queues(&mut self) -> Vec<Command> {
+        let names = self.known_task_queue_names();
+        if names.is_empty() {
+            self.show_notice(
+                "No Task Queue names discovered; load Workflows or Workers first",
+                NoticeKind::Info,
+            );
+            return Vec::new();
+        }
+        let request_id = self.next_request_id();
+        self.current_task_queues_request = request_id;
+        self.loading_task_queues = true;
+        self.last_refresh_started = Instant::now();
+        vec![Command::LoadTaskQueues {
+            request_id,
+            namespace: self.namespace.clone(),
+            names,
+        }]
+    }
+
+    fn refresh_workers(&mut self, reset_pagination: bool) -> Vec<Command> {
+        if reset_pagination {
+            self.reset_worker_pagination();
+        }
+        let request_id = self.next_request_id();
+        self.current_workers_request = request_id;
+        self.loading_workers = true;
+        self.last_refresh_started = Instant::now();
+        vec![Command::LoadWorkers {
+            request_id,
+            namespace: self.namespace.clone(),
+            query: String::new(),
+            page_size: self.page_size,
+            next_page_token: self.worker_current_page_token.clone(),
+        }]
+    }
+
+    fn refresh_worker_deployments(&mut self, reset_pagination: bool) -> Vec<Command> {
+        if reset_pagination {
+            self.reset_deployment_pagination();
+        }
+        let request_id = self.next_request_id();
+        self.current_worker_deployments_request = request_id;
+        self.loading_worker_deployments = true;
+        self.last_refresh_started = Instant::now();
+        vec![Command::LoadWorkerDeployments {
+            request_id,
+            namespace: self.namespace.clone(),
+            page_size: self.page_size,
+            next_page_token: self.deployment_current_page_token.clone(),
+        }]
+    }
+
+    fn next_page(&mut self) -> Vec<Command> {
+        match self.view {
+            View::Workflows => self.next_workflow_page(),
+            View::Workers => self.next_worker_page(),
+            View::Deployments => self.next_deployment_page(),
+            View::TaskQueues => {
+                self.show_notice("Task Queue diagnostics are not paginated", NoticeKind::Info);
+                Vec::new()
+            }
+        }
+    }
+
+    fn previous_page(&mut self) -> Vec<Command> {
+        match self.view {
+            View::Workflows => self.previous_workflow_page(),
+            View::Workers => self.previous_worker_page(),
+            View::Deployments => self.previous_deployment_page(),
+            View::TaskQueues => {
+                self.show_notice("Task Queue diagnostics are not paginated", NoticeKind::Info);
+                Vec::new()
+            }
+        }
+    }
+
+    fn next_worker_page(&mut self) -> Vec<Command> {
+        if self.loading_workers {
+            self.show_notice("Worker page is still loading", NoticeKind::Info);
+            return Vec::new();
+        }
+        if self.worker_next_page_token.is_empty() {
+            self.show_notice("Already on the last Worker page", NoticeKind::Info);
+            return Vec::new();
+        }
+        self.worker_previous_page_tokens
+            .push(self.worker_current_page_token.clone());
+        self.worker_current_page_token = std::mem::take(&mut self.worker_next_page_token);
+        self.refresh_workers(false)
+    }
+
+    fn previous_worker_page(&mut self) -> Vec<Command> {
+        if self.loading_workers {
+            self.show_notice("Worker page is still loading", NoticeKind::Info);
+            return Vec::new();
+        }
+        let Some(previous) = self.worker_previous_page_tokens.pop() else {
+            self.show_notice("Already on the first Worker page", NoticeKind::Info);
+            return Vec::new();
+        };
+        self.worker_current_page_token = previous;
+        self.refresh_workers(false)
+    }
+
+    fn next_deployment_page(&mut self) -> Vec<Command> {
+        if self.loading_worker_deployments {
+            self.show_notice("Deployment page is still loading", NoticeKind::Info);
+            return Vec::new();
+        }
+        if self.deployment_next_page_token.is_empty() {
+            self.show_notice("Already on the last Deployment page", NoticeKind::Info);
+            return Vec::new();
+        }
+        self.deployment_previous_page_tokens
+            .push(self.deployment_current_page_token.clone());
+        self.deployment_current_page_token = std::mem::take(&mut self.deployment_next_page_token);
+        self.refresh_worker_deployments(false)
+    }
+
+    fn previous_deployment_page(&mut self) -> Vec<Command> {
+        if self.loading_worker_deployments {
+            self.show_notice("Deployment page is still loading", NoticeKind::Info);
+            return Vec::new();
+        }
+        let Some(previous) = self.deployment_previous_page_tokens.pop() else {
+            self.show_notice("Already on the first Deployment page", NoticeKind::Info);
+            return Vec::new();
+        };
+        self.deployment_current_page_token = previous;
+        self.refresh_worker_deployments(false)
+    }
+
+    fn reset_worker_pagination(&mut self) {
+        self.worker_current_page_token.clear();
+        self.worker_next_page_token.clear();
+        self.worker_previous_page_tokens.clear();
+        self.worker_page_number = 1;
+        self.worker_has_previous_page = false;
+        self.worker_has_next_page = false;
+    }
+
+    fn reset_deployment_pagination(&mut self) {
+        self.deployment_current_page_token.clear();
+        self.deployment_next_page_token.clear();
+        self.deployment_previous_page_tokens.clear();
+        self.deployment_page_number = 1;
+        self.deployment_has_previous_page = false;
+        self.deployment_has_next_page = false;
     }
 
     fn refresh_workflows(&mut self, reset_pagination: bool) -> Vec<Command> {
@@ -1221,6 +1822,34 @@ impl App {
         })
     }
 
+    fn load_selected_worker_details(&mut self) -> Option<Command> {
+        let instance_key = self.workers.get(self.selected_worker)?.instance_key.clone();
+        let request_id = self.next_request_id();
+        self.current_worker_details_request = request_id;
+        self.loading_worker_details = true;
+        Some(Command::LoadWorkerDetails {
+            request_id,
+            namespace: self.namespace.clone(),
+            instance_key,
+        })
+    }
+
+    fn load_selected_worker_deployment_details(&mut self) -> Option<Command> {
+        let name = self
+            .worker_deployments
+            .get(self.selected_worker_deployment)?
+            .name
+            .clone();
+        let request_id = self.next_request_id();
+        self.current_worker_deployment_details_request = request_id;
+        self.loading_worker_deployment_details = true;
+        Some(Command::LoadWorkerDeploymentDetails {
+            request_id,
+            namespace: self.namespace.clone(),
+            name,
+        })
+    }
+
     fn load_namespaces(&mut self) -> Command {
         let request_id = self.next_request_id();
         self.current_namespace_request = request_id;
@@ -1303,6 +1932,7 @@ mod tests {
             auto_refresh: true,
             color: true,
             read_only: false,
+            codec_enabled: false,
             web_ui_url: Some("http://localhost:8233".to_string()),
             saved_queries: Vec::new(),
         })
@@ -1393,6 +2023,60 @@ mod tests {
         let commands = app.handle_key(key(KeyCode::Enter));
         assert_eq!(app.query, "те");
         assert!(matches!(commands[0], Command::LoadWorkflows { .. }));
+        assert!(app.overlay.is_none());
+    }
+
+    #[test]
+    fn view_switching_loads_each_observability_surface() {
+        let mut task_queues = app();
+        task_queues.workflows = vec![workflow("one", WorkflowStatus::Running)];
+        let commands = task_queues.handle_key(key(KeyCode::Char('2')));
+        assert_eq!(task_queues.view, View::TaskQueues);
+        assert!(matches!(
+            &commands[0],
+            Command::LoadTaskQueues { names, .. } if names == &["orders".to_string()]
+        ));
+        assert!(
+            commands
+                .iter()
+                .any(|command| matches!(command, Command::LoadWorkers { .. }))
+        );
+
+        let mut workers = app();
+        let commands = workers.handle_key(key(KeyCode::Char('3')));
+        assert_eq!(workers.view, View::Workers);
+        assert!(matches!(commands[0], Command::LoadWorkers { .. }));
+
+        let mut deployments = app();
+        let commands = deployments.handle_key(key(KeyCode::Char('4')));
+        assert_eq!(deployments.view, View::Deployments);
+        assert!(matches!(commands[0], Command::LoadWorkerDeployments { .. }));
+    }
+
+    #[test]
+    fn manual_task_queue_name_is_trimmed_and_loaded() {
+        let mut app = app();
+        app.handle_key(key(KeyCode::Char('2')));
+        app.handle_key(key(KeyCode::Char('/')));
+        for character in "  payments  ".chars() {
+            app.handle_key(key(KeyCode::Char(character)));
+        }
+        let commands = app.handle_key(key(KeyCode::Enter));
+        assert!(app.overlay.is_none());
+        assert!(matches!(
+            &commands[0],
+            Command::LoadTaskQueues { names, .. } if names == &["payments".to_string()]
+        ));
+    }
+
+    #[test]
+    fn workflow_mutations_are_not_bound_outside_workflow_view() {
+        let mut app = app();
+        app.workflows = vec![workflow("order-42", WorkflowStatus::Running)];
+        app.handle_key(key(KeyCode::Char('3')));
+        assert!(app.handle_key(key(KeyCode::Char('c'))).is_empty());
+        assert!(app.handle_key(key(KeyCode::Char('x'))).is_empty());
+        assert!(app.handle_key(key(KeyCode::Char('s'))).is_empty());
         assert!(app.overlay.is_none());
     }
 
