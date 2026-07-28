@@ -1,14 +1,13 @@
 use std::{collections::HashMap, path::PathBuf};
 
 use async_trait::async_trait;
+use base64::prelude::*;
 use chrono::{DateTime, Utc};
-use futures_util::StreamExt;
 use serde_json::Value;
 use temporalio_client::{
     Client, ClientOptions, ClientTlsOptions, Connection, ConnectionOptions, TlsOptions,
-    UntypedSignal, WorkflowCancelOptions, WorkflowDescribeOptions, WorkflowExecution,
-    WorkflowExecutionInfo, WorkflowHandle, WorkflowListOptions, WorkflowSignalOptions,
-    WorkflowTerminateOptions,
+    UntypedSignal, WorkflowCancelOptions, WorkflowDescribeOptions, WorkflowExecutionInfo,
+    WorkflowHandle, WorkflowSignalOptions, WorkflowTerminateOptions,
     tonic::{IntoRequest, Request, Status},
 };
 use temporalio_common::{
@@ -17,13 +16,16 @@ use temporalio_common::{
     protos::{
         proto_ts_to_system_time,
         temporal::api::{
-            common::v1::WorkflowExecution as ProtoWorkflowExecution,
-            enums::v1::{EventType, WorkflowExecutionStatus},
+            common::v1::{Payload, Payloads, WorkflowExecution as ProtoWorkflowExecution},
+            enums::v1::{EventType, PendingActivityState, WorkflowExecutionStatus},
+            failure::v1::{Failure, failure::FailureInfo},
             history::v1::{HistoryEvent, history_event::Attributes},
+            workflow::v1::PendingActivityInfo,
             workflow::v1::WorkflowExecutionInfo as ProtoWorkflowExecutionInfo,
             workflowservice::v1::{
-                DescribeNamespaceResponse, GetClusterInfoRequest,
+                CountWorkflowExecutionsRequest, DescribeNamespaceResponse, GetClusterInfoRequest,
                 GetWorkflowExecutionHistoryReverseRequest, ListNamespacesRequest,
+                ListWorkflowExecutionsRequest,
             },
         },
     },
@@ -32,8 +34,9 @@ use thiserror::Error;
 use url::Url;
 
 use crate::model::{
-    ClusterInfo, HistoryEventSummary, NamespaceSummary, WorkflowDetails, WorkflowKey,
-    WorkflowStatus, WorkflowSummary,
+    ClusterInfo, FailureSummary, HistoryEventSummary, HistoryPage, NamespaceSummary,
+    PendingActivitySummary, StructuredField, WorkflowCount, WorkflowCountGroup, WorkflowDetails,
+    WorkflowKey, WorkflowPage, WorkflowStatus, WorkflowSummary,
 };
 
 /// TLS settings loaded by the client at startup.
@@ -97,14 +100,34 @@ pub trait TemporalService: Send + Sync {
         &self,
         namespace: &str,
         query: &str,
-        limit: usize,
-    ) -> Result<Vec<WorkflowSummary>, ServiceError>;
+        page_size: usize,
+        next_page_token: Vec<u8>,
+    ) -> Result<WorkflowPage, ServiceError>;
+
+    async fn count_workflows(
+        &self,
+        namespace: &str,
+        query: &str,
+    ) -> Result<WorkflowCount, ServiceError>;
 
     async fn describe_workflow(
         &self,
         namespace: &str,
         key: &WorkflowKey,
     ) -> Result<WorkflowDetails, ServiceError>;
+
+    async fn load_history_page(
+        &self,
+        namespace: &str,
+        key: &WorkflowKey,
+        next_page_token: Vec<u8>,
+    ) -> Result<HistoryPage, ServiceError>;
+
+    async fn list_workflow_chain(
+        &self,
+        namespace: &str,
+        workflow_id: &str,
+    ) -> Result<Vec<WorkflowSummary>, ServiceError>;
 
     async fn cancel_workflow(
         &self,
@@ -196,7 +219,8 @@ impl GrpcTemporalService {
         &self,
         namespace: &str,
         key: &WorkflowKey,
-    ) -> Result<Vec<HistoryEvent>, ServiceError> {
+        next_page_token: Vec<u8>,
+    ) -> Result<HistoryPage, ServiceError> {
         let mut service = self.connection.workflow_service();
         let response = service
             .get_workflow_execution_history_reverse(
@@ -207,7 +231,7 @@ impl GrpcTemporalService {
                         run_id: key.run_id.clone(),
                     }),
                     maximum_page_size: 200,
-                    next_page_token: Vec::new(),
+                    next_page_token,
                 }
                 .into_request(),
             )
@@ -222,7 +246,11 @@ impl GrpcTemporalService {
             .map(|history| history.events)
             .unwrap_or_default();
         events.reverse();
-        Ok(events)
+        Ok(HistoryPage {
+            events: events.iter().map(history_event_summary).collect(),
+            next_page_token: response.next_page_token,
+            archived: false,
+        })
     }
 }
 
@@ -286,22 +314,76 @@ impl TemporalService for GrpcTemporalService {
         &self,
         namespace: &str,
         query: &str,
-        limit: usize,
-    ) -> Result<Vec<WorkflowSummary>, ServiceError> {
-        let client = self.client(namespace)?;
-        let options = WorkflowListOptions::builder().limit(limit).build();
-        let mut stream = client.list_workflows(query.to_string(), options);
-        let mut workflows = Vec::with_capacity(limit.min(512));
-
-        while let Some(workflow) = stream.next().await {
-            let workflow = workflow.map_err(|error| ServiceError::Client {
+        page_size: usize,
+        next_page_token: Vec<u8>,
+    ) -> Result<WorkflowPage, ServiceError> {
+        let mut service = self.connection.workflow_service();
+        let response = service
+            .list_workflow_executions(
+                ListWorkflowExecutionsRequest {
+                    namespace: namespace.to_string(),
+                    page_size: i32::try_from(page_size).unwrap_or(i32::MAX),
+                    next_page_token,
+                    query: query.to_string(),
+                }
+                .into_request(),
+            )
+            .await
+            .map_err(|source| ServiceError::Rpc {
                 operation: "list workflows",
-                message: error.to_string(),
-            })?;
-            workflows.push(workflow_summary(&workflow));
-        }
+                source,
+            })?
+            .into_inner();
 
-        Ok(workflows)
+        Ok(WorkflowPage {
+            workflows: response
+                .executions
+                .iter()
+                .map(workflow_summary_from_proto)
+                .collect(),
+            next_page_token: response.next_page_token,
+        })
+    }
+
+    async fn count_workflows(
+        &self,
+        namespace: &str,
+        query: &str,
+    ) -> Result<WorkflowCount, ServiceError> {
+        let mut service = self.connection.workflow_service();
+        let response = service
+            .count_workflow_executions(
+                CountWorkflowExecutionsRequest {
+                    namespace: namespace.to_string(),
+                    query: query.to_string(),
+                }
+                .into_request(),
+            )
+            .await
+            .map_err(|source| ServiceError::Rpc {
+                operation: "count workflows",
+                source,
+            })?
+            .into_inner();
+
+        Ok(WorkflowCount {
+            total: response.count,
+            groups: response
+                .groups
+                .into_iter()
+                .map(|group| WorkflowCountGroup {
+                    values: group
+                        .group_values
+                        .iter()
+                        .enumerate()
+                        .map(|(index, payload)| {
+                            payload_field(format!("group {}", index + 1), payload).value
+                        })
+                        .collect(),
+                    count: group.count,
+                })
+                .collect(),
+        })
     }
 
     async fn describe_workflow(
@@ -319,7 +401,7 @@ impl TemporalService for GrpcTemporalService {
                     message: error.to_string(),
                 })
         };
-        let recent_history = self.recent_history(namespace, key);
+        let recent_history = self.recent_history(namespace, key, Vec::new());
         let (description, history) = tokio::try_join!(describe, recent_history)?;
 
         let raw = description.raw();
@@ -332,22 +414,85 @@ impl TemporalService for GrpcTemporalService {
                 })?;
         let summary = workflow_summary_from_proto(raw_info);
 
+        let extended = raw.workflow_extended_info.as_ref();
+        let parent = raw_info.parent_execution.as_ref();
+        let root = raw_info.root_execution.as_ref();
         Ok(WorkflowDetails {
             summary,
             first_run_id: raw_info.first_run_id.clone(),
-            parent_workflow_id: raw_info
-                .parent_execution
-                .as_ref()
+            parent_workflow_id: parent
                 .map(|execution| execution.workflow_id.clone())
                 .filter(|id| !id.is_empty()),
+            parent_run_id: parent
+                .map(|execution| execution.run_id.clone())
+                .filter(|id| !id.is_empty()),
+            root_workflow_id: root
+                .map(|execution| execution.workflow_id.clone())
+                .filter(|id| !id.is_empty()),
+            root_run_id: root
+                .map(|execution| execution.run_id.clone())
+                .filter(|id| !id.is_empty()),
+            reset_run_id: extended
+                .map(|value| value.reset_run_id.clone())
+                .filter(|id| !id.is_empty()),
+            cancel_requested: extended.is_some_and(|value| value.cancel_requested),
             pending_activities: raw.pending_activities.len(),
+            pending_activity_details: raw
+                .pending_activities
+                .iter()
+                .map(pending_activity_summary)
+                .collect(),
             pending_children: raw.pending_children.len(),
             pending_nexus_operations: raw.pending_nexus_operations.len(),
             state_transition_count: raw_info.state_transition_count,
             static_summary: description.static_summary().map(ToOwned::to_owned),
             static_details: description.static_details().map(ToOwned::to_owned),
-            events: history.iter().map(history_event_summary).collect(),
+            memo: raw_info
+                .memo
+                .as_ref()
+                .map_or_else(Vec::new, |memo| payload_map(&memo.fields)),
+            search_attributes: raw_info
+                .search_attributes
+                .as_ref()
+                .map_or_else(Vec::new, |attributes| {
+                    payload_map(&attributes.indexed_fields)
+                }),
+            events: history.events,
+            history_next_page_token: history.next_page_token,
+            history_archived: history.archived,
         })
+    }
+
+    async fn load_history_page(
+        &self,
+        namespace: &str,
+        key: &WorkflowKey,
+        next_page_token: Vec<u8>,
+    ) -> Result<HistoryPage, ServiceError> {
+        self.recent_history(namespace, key, next_page_token).await
+    }
+
+    async fn list_workflow_chain(
+        &self,
+        namespace: &str,
+        workflow_id: &str,
+    ) -> Result<Vec<WorkflowSummary>, ServiceError> {
+        let escaped = workflow_id.replace('\'', "''");
+        let query = format!("WorkflowId = '{escaped}'");
+        let mut token = Vec::new();
+        let mut workflows = Vec::new();
+        loop {
+            let page = self
+                .list_workflows(namespace, &query, 200, std::mem::take(&mut token))
+                .await?;
+            workflows.extend(page.workflows);
+            token = page.next_page_token;
+            if token.is_empty() {
+                break;
+            }
+        }
+        workflows.sort_by_key(|workflow| std::cmp::Reverse(workflow.start_time));
+        Ok(workflows)
     }
 
     async fn cancel_workflow(
@@ -409,10 +554,6 @@ impl TemporalService for GrpcTemporalService {
                 message: error.to_string(),
             })
     }
-}
-
-fn workflow_summary(workflow: &WorkflowExecution) -> WorkflowSummary {
-    workflow_summary_from_proto(workflow.raw())
 }
 
 fn workflow_summary_from_proto(info: &ProtoWorkflowExecutionInfo) -> WorkflowSummary {
@@ -479,11 +620,60 @@ fn history_event_summary(event: &HistoryEvent) -> HistoryEventSummary {
         |_| format!("EVENT_{}", event.event_type),
         |kind| prettify_debug_name(&format!("{kind:?}")),
     );
+    let (fields, failure) = history_event_data(event);
     HistoryEventSummary {
         event_id: event.event_id,
         event_type,
         event_time: event.event_time.as_ref().and_then(proto_datetime),
         detail: history_event_detail(event),
+        fields,
+        failure,
+    }
+}
+
+fn history_event_data(event: &HistoryEvent) -> (Vec<StructuredField>, Option<FailureSummary>) {
+    match event.attributes.as_ref() {
+        Some(Attributes::WorkflowExecutionStartedEventAttributes(attributes)) => (
+            payload_fields("input", attributes.input.as_ref()),
+            attributes.continued_failure.as_ref().map(failure_summary),
+        ),
+        Some(Attributes::WorkflowExecutionCompletedEventAttributes(attributes)) => {
+            (payload_fields("result", attributes.result.as_ref()), None)
+        }
+        Some(Attributes::WorkflowExecutionFailedEventAttributes(attributes)) => {
+            (Vec::new(), attributes.failure.as_ref().map(failure_summary))
+        }
+        Some(Attributes::WorkflowExecutionCanceledEventAttributes(attributes)) => {
+            (payload_fields("details", attributes.details.as_ref()), None)
+        }
+        Some(Attributes::WorkflowExecutionTerminatedEventAttributes(attributes)) => {
+            (payload_fields("details", attributes.details.as_ref()), None)
+        }
+        Some(Attributes::WorkflowExecutionSignaledEventAttributes(attributes)) => {
+            (payload_fields("input", attributes.input.as_ref()), None)
+        }
+        Some(Attributes::ActivityTaskScheduledEventAttributes(attributes)) => {
+            (payload_fields("input", attributes.input.as_ref()), None)
+        }
+        Some(Attributes::ActivityTaskCompletedEventAttributes(attributes)) => {
+            (payload_fields("result", attributes.result.as_ref()), None)
+        }
+        Some(Attributes::ActivityTaskFailedEventAttributes(attributes)) => {
+            (Vec::new(), attributes.failure.as_ref().map(failure_summary))
+        }
+        Some(Attributes::ActivityTaskCanceledEventAttributes(attributes)) => {
+            (payload_fields("details", attributes.details.as_ref()), None)
+        }
+        Some(Attributes::MarkerRecordedEventAttributes(attributes)) => {
+            let mut fields = attributes
+                .details
+                .iter()
+                .flat_map(|(name, payloads)| payload_fields(name, Some(payloads)))
+                .collect::<Vec<_>>();
+            fields.sort_by(|left, right| left.name.cmp(&right.name));
+            (fields, attributes.failure.as_ref().map(failure_summary))
+        }
+        _ => (Vec::new(), None),
     }
 }
 
@@ -542,6 +732,195 @@ fn history_event_detail(event: &HistoryEvent) -> String {
     } else {
         detail
     }
+}
+
+fn pending_activity_summary(activity: &PendingActivityInfo) -> PendingActivitySummary {
+    let state = PendingActivityState::try_from(activity.state).map_or_else(
+        |_| format!("STATE_{}", activity.state),
+        |state| prettify_debug_name(&format!("{state:?}")),
+    );
+    PendingActivitySummary {
+        activity_id: activity.activity_id.clone(),
+        activity_type: activity
+            .activity_type
+            .as_ref()
+            .map(|value| value.name.clone())
+            .unwrap_or_default(),
+        state,
+        attempt: activity.attempt,
+        maximum_attempts: activity.maximum_attempts,
+        last_worker_identity: activity.last_worker_identity.clone(),
+        paused: activity.paused,
+        last_failure: activity.last_failure.as_ref().map(failure_summary),
+    }
+}
+
+fn failure_summary(failure: &Failure) -> FailureSummary {
+    let kind = match failure.failure_info.as_ref() {
+        Some(FailureInfo::ApplicationFailureInfo(info)) if !info.r#type.is_empty() => {
+            format!("APPLICATION ({})", info.r#type)
+        }
+        Some(FailureInfo::ApplicationFailureInfo(_)) => "APPLICATION".to_string(),
+        Some(FailureInfo::TimeoutFailureInfo(_)) => "TIMEOUT".to_string(),
+        Some(FailureInfo::CanceledFailureInfo(_)) => "CANCELED".to_string(),
+        Some(FailureInfo::TerminatedFailureInfo(_)) => "TERMINATED".to_string(),
+        Some(FailureInfo::ServerFailureInfo(_)) => "SERVER".to_string(),
+        Some(FailureInfo::ResetWorkflowFailureInfo(_)) => "RESET".to_string(),
+        Some(FailureInfo::ActivityFailureInfo(_)) => "ACTIVITY".to_string(),
+        Some(FailureInfo::ChildWorkflowExecutionFailureInfo(_)) => "CHILD WORKFLOW".to_string(),
+        Some(FailureInfo::NexusOperationExecutionFailureInfo(_)) => "NEXUS OPERATION".to_string(),
+        Some(FailureInfo::NexusHandlerFailureInfo(_)) => "NEXUS HANDLER".to_string(),
+        None => "FAILURE".to_string(),
+    };
+    FailureSummary {
+        message: truncate_text(&failure.message, 4_096),
+        source: truncate_text(&failure.source, 256),
+        kind,
+        stack_trace: truncate_text(&failure.stack_trace, 16_384),
+        encoded_attributes: failure
+            .encoded_attributes
+            .as_ref()
+            .map(|payload| payload_field("encoded attributes", payload)),
+        cause: failure.cause.as_deref().map(failure_summary).map(Box::new),
+    }
+}
+
+fn payload_map(values: &HashMap<String, Payload>) -> Vec<StructuredField> {
+    let mut fields = values
+        .iter()
+        .map(|(name, payload)| payload_field(name.clone(), payload))
+        .collect::<Vec<_>>();
+    fields.sort_by(|left, right| left.name.cmp(&right.name));
+    fields
+}
+
+fn payload_fields(prefix: &str, payloads: Option<&Payloads>) -> Vec<StructuredField> {
+    payloads.map_or_else(Vec::new, |payloads| {
+        payloads
+            .payloads
+            .iter()
+            .enumerate()
+            .map(|(index, payload)| {
+                let name = if payloads.payloads.len() == 1 {
+                    prefix.to_string()
+                } else {
+                    format!("{prefix}[{}]", index + 1)
+                };
+                payload_field(name, payload)
+            })
+            .collect()
+    })
+}
+
+fn payload_field(name: impl Into<String>, payload: &Payload) -> StructuredField {
+    const MAX_PREVIEW_BYTES: usize = 4_096;
+
+    let name = name.into();
+    let encoding = payload
+        .metadata
+        .get("encoding")
+        .and_then(|value| std::str::from_utf8(value).ok())
+        .unwrap_or("binary/unknown")
+        .to_string();
+    let size_bytes = payload.data.len()
+        + payload
+            .external_payloads
+            .iter()
+            .filter_map(|value| usize::try_from(value.size_bytes).ok())
+            .sum::<usize>();
+    let mut redacted = looks_sensitive_field_name(&name);
+    let value = if redacted {
+        "<redacted>".to_string()
+    } else if !payload.external_payloads.is_empty() && payload.data.is_empty() {
+        format!("<{size_bytes} externally stored bytes>")
+    } else if matches!(encoding.as_str(), "json/plain" | "json/protobuf") {
+        serde_json::from_slice::<Value>(&payload.data).map_or_else(
+            |_| truncate_bytes_lossy(&payload.data, MAX_PREVIEW_BYTES),
+            |mut value| {
+                redacted |= redact_json_value(&mut value);
+                let rendered =
+                    serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string());
+                truncate_text(&rendered, MAX_PREVIEW_BYTES)
+            },
+        )
+    } else if matches!(encoding.as_str(), "binary/plain" | "binary/null") {
+        truncate_bytes_lossy(&payload.data, MAX_PREVIEW_BYTES)
+    } else {
+        let preview = &payload.data[..payload.data.len().min(MAX_PREVIEW_BYTES)];
+        let mut rendered = BASE64_STANDARD.encode(preview);
+        if preview.len() < payload.data.len() {
+            rendered.push('…');
+        }
+        rendered
+    };
+    StructuredField {
+        name,
+        encoding,
+        value,
+        size_bytes,
+        redacted,
+    }
+}
+
+fn redact_json_value(value: &mut Value) -> bool {
+    match value {
+        Value::Object(object) => {
+            let mut redacted = false;
+            for (key, value) in object {
+                if looks_sensitive_field_name(key) {
+                    *value = Value::String("<redacted>".to_string());
+                    redacted = true;
+                } else {
+                    redacted |= redact_json_value(value);
+                }
+            }
+            redacted
+        }
+        Value::Array(values) => {
+            let mut redacted = false;
+            for value in values {
+                redacted |= redact_json_value(value);
+            }
+            redacted
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => false,
+    }
+}
+
+fn looks_sensitive_field_name(name: &str) -> bool {
+    let normalized = name.to_ascii_lowercase().replace(['-', '.'], "_");
+    [
+        "password",
+        "passwd",
+        "secret",
+        "token",
+        "api_key",
+        "authorization",
+        "credential",
+        "cookie",
+    ]
+    .iter()
+    .any(|needle| normalized.contains(needle))
+}
+
+fn truncate_bytes_lossy(value: &[u8], limit: usize) -> String {
+    let preview = &value[..value.len().min(limit)];
+    let mut rendered = String::from_utf8_lossy(preview).into_owned();
+    if preview.len() < value.len() {
+        rendered.push('…');
+    }
+    rendered
+}
+
+fn truncate_text(value: &str, limit: usize) -> String {
+    if value.len() <= limit {
+        return value.to_string();
+    }
+    let mut boundary = limit;
+    while !value.is_char_boundary(boundary) {
+        boundary = boundary.saturating_sub(1);
+    }
+    format!("{}…", &value[..boundary])
 }
 
 fn join_detail<'a>(values: impl IntoIterator<Item = &'a str>) -> String {
@@ -726,5 +1105,19 @@ mod tests {
             }),
             "3d"
         );
+    }
+
+    #[test]
+    fn redacts_sensitive_keys_inside_json_payloads() {
+        let payload = Payload {
+            metadata: HashMap::from([("encoding".to_string(), b"json/plain".to_vec())]),
+            data: br#"{"customer":"Ada","credentials":{"api_key":"do-not-export"}}"#.to_vec(),
+            ..Default::default()
+        };
+        let field = payload_field("input", &payload);
+        assert!(field.redacted);
+        assert!(field.value.contains("Ada"));
+        assert!(field.value.contains("<redacted>"));
+        assert!(!field.value.contains("do-not-export"));
     }
 }

@@ -2,19 +2,34 @@ use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use serde_json::Value;
+use url::Url;
 
-use crate::model::{ClusterInfo, NamespaceSummary, WorkflowDetails, WorkflowKey, WorkflowSummary};
+use crate::model::{
+    ClusterInfo, HistoryPage, NamespaceSummary, WorkflowCount, WorkflowDetails, WorkflowKey,
+    WorkflowPage, WorkflowSummary,
+};
+
+/// Named visibility query loaded from the local config.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SavedQuery {
+    pub name: String,
+    pub query: String,
+}
 
 /// Startup behavior and presentation preferences.
 #[derive(Debug, Clone)]
 pub struct AppConfig {
     pub address: String,
+    pub profile_name: Option<String>,
     pub namespace: String,
     pub query: String,
     pub page_size: usize,
     pub refresh_interval: Duration,
     pub auto_refresh: bool,
     pub color: bool,
+    pub read_only: bool,
+    pub web_ui_url: Option<String>,
+    pub saved_queries: Vec<SavedQuery>,
 }
 
 /// Which primary pane receives navigation keys.
@@ -62,6 +77,12 @@ impl ConfirmAction {
 pub enum Overlay {
     Help,
     Query(TextInput),
+    SavedQueryPicker {
+        selected: usize,
+    },
+    Aggregations {
+        selected: usize,
+    },
     NamespacePicker {
         selected: usize,
     },
@@ -69,8 +90,15 @@ pub enum Overlay {
         action: ConfirmAction,
         key: WorkflowKey,
         workflow_id: String,
+        input: TextInput,
     },
     Signal(SignalForm),
+    WorkflowChain {
+        selected: usize,
+    },
+    Inspector {
+        scroll: u16,
+    },
 }
 
 /// Editable single-line text with a character-index cursor.
@@ -165,12 +193,29 @@ pub enum Command {
         request_id: u64,
         namespace: String,
         query: String,
-        limit: usize,
+        page_size: usize,
+        next_page_token: Vec<u8>,
+    },
+    CountWorkflows {
+        request_id: u64,
+        namespace: String,
+        query: String,
     },
     LoadDetails {
         request_id: u64,
         namespace: String,
         key: WorkflowKey,
+    },
+    LoadHistoryPage {
+        request_id: u64,
+        namespace: String,
+        key: WorkflowKey,
+        next_page_token: Vec<u8>,
+    },
+    LoadWorkflowChain {
+        request_id: u64,
+        namespace: String,
+        workflow_id: String,
     },
     Cancel {
         request_id: u64,
@@ -191,6 +236,20 @@ pub enum Command {
         signal_name: String,
         input: Value,
     },
+    Copy {
+        request_id: u64,
+        text: String,
+    },
+    Export {
+        request_id: u64,
+        namespace: String,
+        cluster: Option<ClusterInfo>,
+        details: Box<WorkflowDetails>,
+    },
+    OpenWeb {
+        request_id: u64,
+        url: String,
+    },
 }
 
 /// Result of an asynchronous command.
@@ -203,17 +262,42 @@ pub enum Message {
     },
     WorkflowsLoaded {
         request_id: u64,
-        result: Result<Vec<WorkflowSummary>, String>,
+        result: Result<WorkflowPage, String>,
+    },
+    WorkflowCountLoaded {
+        request_id: u64,
+        result: Result<WorkflowCount, String>,
     },
     DetailsLoaded {
         request_id: u64,
-        result: Result<WorkflowDetails, String>,
+        result: Result<Box<WorkflowDetails>, String>,
+    },
+    HistoryPageLoaded {
+        request_id: u64,
+        result: Result<HistoryPage, String>,
+    },
+    WorkflowChainLoaded {
+        request_id: u64,
+        result: Result<Vec<WorkflowSummary>, String>,
     },
     OperationFinished {
         request_id: u64,
         operation: OperationKind,
         result: Result<(), String>,
     },
+    UtilityFinished {
+        request_id: u64,
+        operation: UtilityKind,
+        result: Result<String, String>,
+    },
+}
+
+/// Local desktop side effect.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UtilityKind {
+    Copy,
+    Export,
+    OpenWeb,
 }
 
 /// Completed mutating operation.
@@ -241,30 +325,48 @@ impl OperationKind {
 )]
 pub struct App {
     pub address: String,
+    pub profile_name: Option<String>,
     pub namespace: String,
     pub query: String,
     pub page_size: usize,
     pub refresh_interval: Duration,
     pub auto_refresh: bool,
     pub color: bool,
+    pub read_only: bool,
+    pub web_ui_url: Option<String>,
+    pub saved_queries: Vec<SavedQuery>,
     pub cluster: Option<ClusterInfo>,
     pub namespaces: Vec<NamespaceSummary>,
     pub workflows: Vec<WorkflowSummary>,
+    pub workflow_count: Option<WorkflowCount>,
+    pub page_number: usize,
+    pub has_previous_page: bool,
+    pub has_next_page: bool,
     pub selected_workflow: usize,
     pub details: Option<WorkflowDetails>,
+    pub workflow_chain: Vec<WorkflowSummary>,
     pub selected_event: usize,
     pub focus: Focus,
     pub overlay: Option<Overlay>,
     pub notice: Option<Notice>,
     pub loading_workflows: bool,
     pub loading_details: bool,
+    pub loading_history_page: bool,
+    pub loading_chain: bool,
     pub operation_in_flight: bool,
     pub should_quit: bool,
     current_workflow_request: u64,
+    current_count_request: u64,
     current_detail_request: u64,
+    current_history_request: u64,
+    current_chain_request: u64,
     current_namespace_request: u64,
     current_operation_request: u64,
+    current_utility_request: u64,
     next_request_id: u64,
+    current_page_token: Vec<u8>,
+    next_page_token: Vec<u8>,
+    previous_page_tokens: Vec<Vec<u8>>,
     last_refresh_started: Instant,
 }
 
@@ -273,30 +375,48 @@ impl App {
     pub fn new(config: AppConfig) -> Self {
         Self {
             address: config.address,
+            profile_name: config.profile_name,
             namespace: config.namespace,
             query: config.query,
             page_size: config.page_size,
             refresh_interval: config.refresh_interval,
             auto_refresh: config.auto_refresh,
             color: config.color,
+            read_only: config.read_only,
+            web_ui_url: config.web_ui_url,
+            saved_queries: config.saved_queries,
             cluster: None,
             namespaces: Vec::new(),
             workflows: Vec::new(),
+            workflow_count: None,
+            page_number: 1,
+            has_previous_page: false,
+            has_next_page: false,
             selected_workflow: 0,
             details: None,
+            workflow_chain: Vec::new(),
             selected_event: 0,
             focus: Focus::Workflows,
             overlay: None,
             notice: None,
             loading_workflows: false,
             loading_details: false,
+            loading_history_page: false,
+            loading_chain: false,
             operation_in_flight: false,
             should_quit: false,
             current_workflow_request: 0,
+            current_count_request: 0,
             current_detail_request: 0,
+            current_history_request: 0,
+            current_chain_request: 0,
             current_namespace_request: 0,
             current_operation_request: 0,
+            current_utility_request: 0,
             next_request_id: 0,
+            current_page_token: Vec::new(),
+            next_page_token: Vec::new(),
+            previous_page_tokens: Vec::new(),
             last_refresh_started: Instant::now(),
         }
     }
@@ -304,7 +424,7 @@ impl App {
     /// Initial data fetches.
     pub fn bootstrap(&mut self) -> Vec<Command> {
         let mut commands = vec![Command::LoadCluster, self.load_namespaces()];
-        commands.push(self.refresh_workflows());
+        commands.extend(self.refresh_workflows(true));
         commands
     }
 
@@ -346,11 +466,15 @@ impl App {
                 }
                 self.loading_workflows = false;
                 match result {
-                    Ok(workflows) => {
+                    Ok(page) => {
                         let previous_key = self
                             .selected_workflow()
                             .map(|workflow| workflow.key.clone());
-                        self.workflows = workflows;
+                        self.next_page_token = page.next_page_token;
+                        self.has_previous_page = !self.previous_page_tokens.is_empty();
+                        self.has_next_page = !self.next_page_token.is_empty();
+                        self.page_number = self.previous_page_tokens.len() + 1;
+                        self.workflows = page.workflows;
                         self.selected_workflow = previous_key
                             .and_then(|key| {
                                 self.workflows
@@ -369,6 +493,16 @@ impl App {
                     }
                 }
             }
+            Message::WorkflowCountLoaded { request_id, result } => {
+                if request_id != self.current_count_request {
+                    return Vec::new();
+                }
+                match result {
+                    Ok(count) => self.workflow_count = Some(count),
+                    Err(error) => self.show_notice(error, NoticeKind::Error),
+                }
+                Vec::new()
+            }
             Message::DetailsLoaded { request_id, result } => {
                 if request_id != self.current_detail_request {
                     return Vec::new();
@@ -377,7 +511,54 @@ impl App {
                 match result {
                     Ok(details) => {
                         self.selected_event = details.events.len().saturating_sub(1);
-                        self.details = Some(details);
+                        self.details = Some(*details);
+                    }
+                    Err(error) => self.show_notice(error, NoticeKind::Error),
+                }
+                Vec::new()
+            }
+            Message::HistoryPageLoaded { request_id, result } => {
+                if request_id != self.current_history_request {
+                    return Vec::new();
+                }
+                self.loading_history_page = false;
+                match result {
+                    Ok(page) => {
+                        if let Some(details) = &mut self.details {
+                            let selected_event_id = details
+                                .events
+                                .get(self.selected_event)
+                                .map(|event| event.event_id);
+                            let mut events = page.events;
+                            events.append(&mut details.events);
+                            events.sort_by_key(|event| event.event_id);
+                            events.dedup_by_key(|event| event.event_id);
+                            details.events = events;
+                            details.history_next_page_token = page.next_page_token;
+                            details.history_archived |= page.archived;
+                            self.selected_event = selected_event_id
+                                .and_then(|event_id| {
+                                    details
+                                        .events
+                                        .iter()
+                                        .position(|event| event.event_id == event_id)
+                                })
+                                .unwrap_or(0);
+                        }
+                    }
+                    Err(error) => self.show_notice(error, NoticeKind::Error),
+                }
+                Vec::new()
+            }
+            Message::WorkflowChainLoaded { request_id, result } => {
+                if request_id != self.current_chain_request {
+                    return Vec::new();
+                }
+                self.loading_chain = false;
+                match result {
+                    Ok(chain) => {
+                        self.workflow_chain = chain;
+                        self.overlay = Some(Overlay::WorkflowChain { selected: 0 });
                     }
                     Err(error) => self.show_notice(error, NoticeKind::Error),
                 }
@@ -395,13 +576,34 @@ impl App {
                 match result {
                     Ok(()) => {
                         self.show_notice(operation.success_message(), NoticeKind::Success);
-                        vec![self.refresh_workflows()]
+                        self.refresh_workflows(false)
                     }
                     Err(error) => {
                         self.show_notice(error, NoticeKind::Error);
                         Vec::new()
                     }
                 }
+            }
+            Message::UtilityFinished {
+                request_id,
+                operation,
+                result,
+            } => {
+                if request_id != self.current_utility_request {
+                    return Vec::new();
+                }
+                match result {
+                    Ok(detail) => {
+                        let message = match operation {
+                            UtilityKind::Copy => "Copied workflow identity".to_string(),
+                            UtilityKind::Export => format!("Exported to {detail}"),
+                            UtilityKind::OpenWeb => "Opened in Temporal Web UI".to_string(),
+                        };
+                        self.show_notice(message, NoticeKind::Success);
+                    }
+                    Err(error) => self.show_notice(error, NoticeKind::Error),
+                }
+                Vec::new()
             }
         }
     }
@@ -419,7 +621,7 @@ impl App {
             && !self.loading_workflows
             && now.duration_since(self.last_refresh_started) >= self.refresh_interval
         {
-            return vec![self.refresh_workflows()];
+            return self.refresh_workflows(false);
         }
         Vec::new()
     }
@@ -444,6 +646,27 @@ impl App {
             KeyCode::Char('/') => {
                 self.overlay = Some(Overlay::Query(TextInput::new(self.query.clone())));
             }
+            KeyCode::Char('f') => {
+                if self.saved_queries.is_empty() {
+                    self.show_notice("No saved visibility queries", NoticeKind::Info);
+                } else {
+                    self.overlay = Some(Overlay::SavedQueryPicker { selected: 0 });
+                }
+            }
+            KeyCode::Char('#') => {
+                if self
+                    .workflow_count
+                    .as_ref()
+                    .is_none_or(|count| count.groups.is_empty())
+                {
+                    self.show_notice(
+                        "The current query has no GROUP BY aggregation",
+                        NoticeKind::Info,
+                    );
+                } else {
+                    self.overlay = Some(Overlay::Aggregations { selected: 0 });
+                }
+            }
             KeyCode::Char('n') => {
                 if self.namespaces.is_empty() {
                     self.show_notice("No namespaces loaded", NoticeKind::Info);
@@ -453,7 +676,7 @@ impl App {
                     });
                 }
             }
-            KeyCode::Char('r') => return vec![self.refresh_workflows()],
+            KeyCode::Char('r') => return self.refresh_workflows(false),
             KeyCode::Char('a') => {
                 self.auto_refresh = !self.auto_refresh;
                 let state = if self.auto_refresh {
@@ -466,6 +689,18 @@ impl App {
             KeyCode::Char('c') => self.open_confirmation(ConfirmAction::Cancel),
             KeyCode::Char('x') => self.open_confirmation(ConfirmAction::Terminate),
             KeyCode::Char('s') => self.open_signal(),
+            KeyCode::Char('[') => return self.previous_workflow_page(),
+            KeyCode::Char(']') => return self.next_workflow_page(),
+            KeyCode::Char('H') => return self.load_older_history(),
+            KeyCode::Char('C') => return self.load_workflow_chain(),
+            KeyCode::Char('v') => {
+                if self.details.is_some() {
+                    self.overlay = Some(Overlay::Inspector { scroll: 0 });
+                }
+            }
+            KeyCode::Char('y') => return self.copy_workflow_identity(),
+            KeyCode::Char('e') => return self.export_workflow(),
+            KeyCode::Char('o') => return self.open_in_web_ui(),
             KeyCode::Tab | KeyCode::Enter => {
                 self.focus = match self.focus {
                     Focus::Workflows if self.details.is_some() => Focus::History,
@@ -498,9 +733,51 @@ impl App {
                 KeyCode::Esc => return Vec::new(),
                 KeyCode::Enter => {
                     self.query = input.value.trim().to_string();
-                    return vec![self.refresh_workflows()];
+                    return self.refresh_workflows(true);
                 }
                 _ => edit_text(input, key),
+            },
+            Overlay::SavedQueryPicker { selected } => match key.code {
+                KeyCode::Esc | KeyCode::Char('q' | 'f') => return Vec::new(),
+                KeyCode::Up | KeyCode::Char('k') => {
+                    *selected = selected.saturating_sub(1);
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    *selected = (*selected + 1).min(self.saved_queries.len().saturating_sub(1));
+                }
+                KeyCode::Home | KeyCode::Char('g') => *selected = 0,
+                KeyCode::End | KeyCode::Char('G') => {
+                    *selected = self.saved_queries.len().saturating_sub(1);
+                }
+                KeyCode::Enter => {
+                    if let Some(filter) = self.saved_queries.get(*selected) {
+                        self.query.clone_from(&filter.query);
+                        return self.refresh_workflows(true);
+                    }
+                    return Vec::new();
+                }
+                _ => {}
+            },
+            Overlay::Aggregations { selected } => match key.code {
+                KeyCode::Esc | KeyCode::Char('q' | '#') => return Vec::new(),
+                KeyCode::Up | KeyCode::Char('k') => {
+                    *selected = selected.saturating_sub(1);
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    let last = self
+                        .workflow_count
+                        .as_ref()
+                        .map_or(0, |count| count.groups.len().saturating_sub(1));
+                    *selected = (*selected + 1).min(last);
+                }
+                KeyCode::Home | KeyCode::Char('g') => *selected = 0,
+                KeyCode::End | KeyCode::Char('G') => {
+                    *selected = self
+                        .workflow_count
+                        .as_ref()
+                        .map_or(0, |count| count.groups.len().saturating_sub(1));
+                }
+                _ => {}
             },
             Overlay::NamespacePicker { selected } => match key.code {
                 KeyCode::Esc | KeyCode::Char('q') => return Vec::new(),
@@ -521,7 +798,7 @@ impl App {
                         self.details = None;
                         self.selected_workflow = 0;
                         self.selected_event = 0;
-                        return vec![self.refresh_workflows()];
+                        return self.refresh_workflows(true);
                     }
                     return Vec::new();
                 }
@@ -530,10 +807,19 @@ impl App {
             Overlay::Confirm {
                 action,
                 key: workflow_key,
-                ..
+                workflow_id,
+                input,
             } => match key.code {
-                KeyCode::Esc | KeyCode::Char('n' | 'N') => return Vec::new(),
-                KeyCode::Char('y' | 'Y') => {
+                KeyCode::Esc => return Vec::new(),
+                KeyCode::Enter => {
+                    if input.value != *workflow_id {
+                        self.show_notice(
+                            "Confirmation must exactly match the Workflow ID",
+                            NoticeKind::Error,
+                        );
+                        self.overlay = Some(overlay);
+                        return Vec::new();
+                    }
                     if self.operation_in_flight {
                         self.overlay = Some(overlay);
                         return Vec::new();
@@ -557,7 +843,7 @@ impl App {
                         },
                     }];
                 }
-                _ => {}
+                _ => edit_text(input, key),
             },
             Overlay::Signal(form) => match key.code {
                 KeyCode::Esc => return Vec::new(),
@@ -609,6 +895,29 @@ impl App {
                     SignalField::Name => edit_text(&mut form.name, key),
                     SignalField::Input => edit_text(&mut form.input, key),
                 },
+            },
+            Overlay::WorkflowChain { selected } => match key.code {
+                KeyCode::Esc | KeyCode::Char('q' | 'C') => return Vec::new(),
+                KeyCode::Up | KeyCode::Char('k') => {
+                    *selected = selected.saturating_sub(1);
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    *selected = (*selected + 1).min(self.workflow_chain.len().saturating_sub(1));
+                }
+                KeyCode::Home | KeyCode::Char('g') => *selected = 0,
+                KeyCode::End | KeyCode::Char('G') => {
+                    *selected = self.workflow_chain.len().saturating_sub(1);
+                }
+                _ => {}
+            },
+            Overlay::Inspector { scroll } => match key.code {
+                KeyCode::Esc | KeyCode::Char('q' | 'v') => return Vec::new(),
+                KeyCode::Up | KeyCode::Char('k') => *scroll = scroll.saturating_sub(1),
+                KeyCode::Down | KeyCode::Char('j') => *scroll = scroll.saturating_add(1),
+                KeyCode::PageUp => *scroll = scroll.saturating_sub(10),
+                KeyCode::PageDown => *scroll = scroll.saturating_add(10),
+                KeyCode::Home | KeyCode::Char('g') => *scroll = 0,
+                _ => {}
             },
         }
 
@@ -681,6 +990,10 @@ impl App {
     }
 
     fn open_confirmation(&mut self, action: ConfirmAction) {
+        if self.read_only {
+            self.show_notice("Read-only mode blocks workflow mutations", NoticeKind::Info);
+            return;
+        }
         if self.operation_in_flight {
             self.show_notice(
                 "A workflow operation is already in progress",
@@ -703,10 +1016,15 @@ impl App {
             action,
             key: workflow.key.clone(),
             workflow_id: workflow.key.workflow_id.clone(),
+            input: TextInput::default(),
         });
     }
 
     fn open_signal(&mut self) {
+        if self.read_only {
+            self.show_notice("Read-only mode blocks workflow mutations", NoticeKind::Info);
+            return;
+        }
         if self.operation_in_flight {
             self.show_notice(
                 "A workflow operation is already in progress",
@@ -728,17 +1046,167 @@ impl App {
         self.overlay = Some(Overlay::Signal(SignalForm::default()));
     }
 
-    fn refresh_workflows(&mut self) -> Command {
+    fn refresh_workflows(&mut self, reset_pagination: bool) -> Vec<Command> {
+        if reset_pagination {
+            self.current_page_token.clear();
+            self.next_page_token.clear();
+            self.previous_page_tokens.clear();
+            self.page_number = 1;
+            self.has_previous_page = false;
+            self.has_next_page = false;
+            self.workflow_count = None;
+        }
         let request_id = self.next_request_id();
         self.current_workflow_request = request_id;
         self.loading_workflows = true;
         self.last_refresh_started = Instant::now();
-        Command::LoadWorkflows {
+        let count_request_id = self.next_request_id();
+        self.current_count_request = count_request_id;
+        vec![
+            Command::LoadWorkflows {
+                request_id,
+                namespace: self.namespace.clone(),
+                query: self.query.clone(),
+                page_size: self.page_size,
+                next_page_token: self.current_page_token.clone(),
+            },
+            Command::CountWorkflows {
+                request_id: count_request_id,
+                namespace: self.namespace.clone(),
+                query: self.query.clone(),
+            },
+        ]
+    }
+
+    fn next_workflow_page(&mut self) -> Vec<Command> {
+        if self.loading_workflows {
+            self.show_notice("Workflow page is still loading", NoticeKind::Info);
+            return Vec::new();
+        }
+        if self.next_page_token.is_empty() {
+            self.show_notice("Already on the last workflow page", NoticeKind::Info);
+            return Vec::new();
+        }
+        self.previous_page_tokens
+            .push(self.current_page_token.clone());
+        self.current_page_token = std::mem::take(&mut self.next_page_token);
+        self.refresh_workflows(false)
+    }
+
+    fn previous_workflow_page(&mut self) -> Vec<Command> {
+        if self.loading_workflows {
+            self.show_notice("Workflow page is still loading", NoticeKind::Info);
+            return Vec::new();
+        }
+        let Some(previous) = self.previous_page_tokens.pop() else {
+            self.show_notice("Already on the first workflow page", NoticeKind::Info);
+            return Vec::new();
+        };
+        self.current_page_token = previous;
+        self.refresh_workflows(false)
+    }
+
+    fn load_older_history(&mut self) -> Vec<Command> {
+        if self.loading_history_page {
+            self.show_notice("History page is still loading", NoticeKind::Info);
+            return Vec::new();
+        }
+        let Some(details) = &self.details else {
+            self.show_notice("No workflow details loaded", NoticeKind::Info);
+            return Vec::new();
+        };
+        if details.history_next_page_token.is_empty() {
+            self.show_notice("Complete workflow history is loaded", NoticeKind::Info);
+            return Vec::new();
+        }
+        let key = details.summary.key.clone();
+        let next_page_token = details.history_next_page_token.clone();
+        let request_id = self.next_request_id();
+        self.current_history_request = request_id;
+        self.loading_history_page = true;
+        vec![Command::LoadHistoryPage {
             request_id,
             namespace: self.namespace.clone(),
-            query: self.query.clone(),
-            limit: self.page_size,
+            key,
+            next_page_token,
+        }]
+    }
+
+    fn load_workflow_chain(&mut self) -> Vec<Command> {
+        if self.loading_chain {
+            self.show_notice("Workflow chain is still loading", NoticeKind::Info);
+            return Vec::new();
         }
+        let Some(workflow_id) = self
+            .selected_workflow()
+            .map(|workflow| workflow.key.workflow_id.clone())
+        else {
+            self.show_notice("No workflow selected", NoticeKind::Info);
+            return Vec::new();
+        };
+        let request_id = self.next_request_id();
+        self.current_chain_request = request_id;
+        self.loading_chain = true;
+        vec![Command::LoadWorkflowChain {
+            request_id,
+            namespace: self.namespace.clone(),
+            workflow_id,
+        }]
+    }
+
+    fn copy_workflow_identity(&mut self) -> Vec<Command> {
+        let Some(key) = self
+            .selected_workflow()
+            .map(|workflow| workflow.key.clone())
+        else {
+            self.show_notice("No workflow selected", NoticeKind::Info);
+            return Vec::new();
+        };
+        let request_id = self.next_request_id();
+        self.current_utility_request = request_id;
+        vec![Command::Copy {
+            request_id,
+            text: format!("{}\n{}", key.workflow_id, key.run_id),
+        }]
+    }
+
+    fn export_workflow(&mut self) -> Vec<Command> {
+        let Some(details) = self.details.clone() else {
+            self.show_notice("No workflow details loaded", NoticeKind::Info);
+            return Vec::new();
+        };
+        let request_id = self.next_request_id();
+        self.current_utility_request = request_id;
+        vec![Command::Export {
+            request_id,
+            namespace: self.namespace.clone(),
+            cluster: self.cluster.clone(),
+            details: Box::new(details),
+        }]
+    }
+
+    fn open_in_web_ui(&mut self) -> Vec<Command> {
+        let Some(base_url) = self.web_ui_url.as_deref() else {
+            self.show_notice("No Temporal Web UI URL configured", NoticeKind::Info);
+            return Vec::new();
+        };
+        let Some(key) = self
+            .selected_workflow()
+            .map(|workflow| workflow.key.clone())
+        else {
+            self.show_notice("No workflow selected", NoticeKind::Info);
+            return Vec::new();
+        };
+        let url = match workflow_web_url(base_url, &self.namespace, &key) {
+            Ok(url) => url,
+            Err(error) => {
+                self.show_notice(error, NoticeKind::Error);
+                return Vec::new();
+            }
+        };
+        let request_id = self.next_request_id();
+        self.current_utility_request = request_id;
+        vec![Command::OpenWeb { request_id, url }]
     }
 
     fn load_selected_details(&mut self) -> Option<Command> {
@@ -792,6 +1260,29 @@ fn edit_text(input: &mut TextInput, key: KeyEvent) {
     }
 }
 
+fn workflow_web_url(base_url: &str, namespace: &str, key: &WorkflowKey) -> Result<String, String> {
+    let mut url =
+        Url::parse(base_url).map_err(|error| format!("Temporal Web UI URL is invalid: {error}"))?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err("Temporal Web UI URL must use http or https".to_string());
+    }
+    {
+        let mut segments = url
+            .path_segments_mut()
+            .map_err(|()| "Temporal Web UI URL cannot be used as a base URL".to_string())?;
+        segments.pop_if_empty();
+        segments.extend([
+            "namespaces",
+            namespace,
+            "workflows",
+            &key.workflow_id,
+            &key.run_id,
+            "history",
+        ]);
+    }
+    Ok(url.into())
+}
+
 #[cfg(test)]
 mod tests {
     use chrono::{TimeZone, Utc};
@@ -804,12 +1295,16 @@ mod tests {
     fn app() -> App {
         App::new(AppConfig {
             address: "localhost:7233".to_string(),
+            profile_name: None,
             namespace: "default".to_string(),
             query: String::new(),
             page_size: 50,
             refresh_interval: Duration::from_secs(5),
             auto_refresh: true,
             color: true,
+            read_only: false,
+            web_ui_url: Some("http://localhost:8233".to_string()),
+            saved_queries: Vec::new(),
         })
     }
 
@@ -846,23 +1341,30 @@ mod tests {
         assert!(matches!(commands[0], Command::LoadCluster));
         assert!(matches!(commands[1], Command::LoadNamespaces { .. }));
         assert!(matches!(commands[2], Command::LoadWorkflows { .. }));
+        assert!(matches!(commands[3], Command::CountWorkflows { .. }));
     }
 
     #[test]
     fn stale_workflow_results_are_ignored() {
         let mut app = app();
-        let first = app.refresh_workflows();
-        let second = app.refresh_workflows();
+        let first = app.refresh_workflows(false);
+        let second = app.refresh_workflows(false);
         let commands = app.handle_message(Message::WorkflowsLoaded {
-            request_id: load_request_id(&first),
-            result: Ok(vec![workflow("stale", WorkflowStatus::Running)]),
+            request_id: load_request_id(&first[0]),
+            result: Ok(WorkflowPage {
+                workflows: vec![workflow("stale", WorkflowStatus::Running)],
+                next_page_token: Vec::new(),
+            }),
         });
         assert!(commands.is_empty());
         assert!(app.workflows.is_empty());
 
         app.handle_message(Message::WorkflowsLoaded {
-            request_id: load_request_id(&second),
-            result: Ok(vec![workflow("fresh", WorkflowStatus::Running)]),
+            request_id: load_request_id(&second[0]),
+            result: Ok(WorkflowPage {
+                workflows: vec![workflow("fresh", WorkflowStatus::Running)],
+                next_page_token: Vec::new(),
+            }),
         });
         assert_eq!(app.workflows[0].key.workflow_id, "fresh");
     }
@@ -906,11 +1408,28 @@ mod tests {
                 ..
             })
         ));
-        let commands = app.handle_key(key(KeyCode::Char('y')));
+        for character in "order-42".chars() {
+            app.handle_key(key(KeyCode::Char(character)));
+        }
+        let commands = app.handle_key(key(KeyCode::Enter));
         assert!(matches!(
             &commands[0],
             Command::Cancel { key, .. } if key.workflow_id == "order-42"
         ));
+    }
+
+    #[test]
+    fn destructive_confirmation_rejects_mismatched_workflow_id() {
+        let mut app = app();
+        app.workflows = vec![workflow("order-42", WorkflowStatus::Running)];
+        app.handle_key(key(KeyCode::Char('x')));
+        for character in "order-41".chars() {
+            app.handle_key(key(KeyCode::Char(character)));
+        }
+        let commands = app.handle_key(key(KeyCode::Enter));
+        assert!(commands.is_empty());
+        assert!(matches!(app.overlay, Some(Overlay::Confirm { .. })));
+        assert_eq!(app.notice.as_ref().unwrap().kind, NoticeKind::Error);
     }
 
     #[test]
@@ -927,7 +1446,10 @@ mod tests {
         let mut app = app();
         app.workflows = vec![workflow("order-42", WorkflowStatus::Running)];
         app.handle_key(key(KeyCode::Char('c')));
-        let commands = app.handle_key(key(KeyCode::Char('y')));
+        for character in "order-42".chars() {
+            app.handle_key(key(KeyCode::Char(character)));
+        }
+        let commands = app.handle_key(key(KeyCode::Enter));
         assert!(matches!(commands[0], Command::Cancel { .. }));
         assert!(app.operation_in_flight);
 
@@ -984,11 +1506,88 @@ mod tests {
     }
 
     #[test]
+    fn saved_query_picker_applies_query_and_resets_cursor() {
+        let mut app = app();
+        app.saved_queries = vec![SavedQuery {
+            name: "failures".to_string(),
+            query: "ExecutionStatus = 'Failed'".to_string(),
+        }];
+        app.current_page_token = vec![9];
+        app.previous_page_tokens = vec![Vec::new()];
+        app.handle_key(key(KeyCode::Char('f')));
+        let commands = app.handle_key(key(KeyCode::Enter));
+        assert_eq!(app.query, "ExecutionStatus = 'Failed'");
+        assert!(matches!(
+            &commands[0],
+            Command::LoadWorkflows {
+                next_page_token,
+                ..
+            } if next_page_token.is_empty()
+        ));
+        assert!(app.previous_page_tokens.is_empty());
+    }
+
+    #[test]
     fn text_input_cursor_is_unicode_safe() {
         let mut input = TextInput::new("a🦀b");
         input.move_left();
         input.backspace();
         assert_eq!(input.value, "ab");
         assert_eq!(input.cursor, 1);
+    }
+
+    #[test]
+    fn read_only_mode_blocks_all_mutations() {
+        let mut app = app();
+        app.read_only = true;
+        app.workflows = vec![workflow("order-42", WorkflowStatus::Running)];
+        assert!(app.handle_key(key(KeyCode::Char('c'))).is_empty());
+        assert!(app.overlay.is_none());
+        assert!(app.handle_key(key(KeyCode::Char('s'))).is_empty());
+        assert!(app.overlay.is_none());
+        assert!(app.notice.is_some());
+    }
+
+    #[test]
+    fn cursor_navigation_preserves_previous_page_token() {
+        let mut app = app();
+        app.next_page_token = vec![2];
+        let next = app.handle_key(key(KeyCode::Char(']')));
+        assert!(matches!(
+            &next[0],
+            Command::LoadWorkflows {
+                next_page_token,
+                ..
+            } if next_page_token == &[2]
+        ));
+        assert_eq!(app.page_number, 1);
+        app.handle_message(Message::WorkflowsLoaded {
+            request_id: load_request_id(&next[0]),
+            result: Ok(WorkflowPage {
+                workflows: vec![workflow("page-2", WorkflowStatus::Running)],
+                next_page_token: Vec::new(),
+            }),
+        });
+        assert_eq!(app.page_number, 2);
+        let previous = app.handle_key(key(KeyCode::Char('[')));
+        assert!(matches!(
+            &previous[0],
+            Command::LoadWorkflows {
+                next_page_token,
+                ..
+            } if next_page_token.is_empty()
+        ));
+    }
+
+    #[test]
+    fn web_url_percent_encodes_identity_segments() {
+        let key = WorkflowKey {
+            workflow_id: "order/42".to_string(),
+            run_id: "run id".to_string(),
+        };
+        let url = workflow_web_url("http://localhost:8233", "team one", &key).unwrap();
+        assert!(url.contains("team%20one"));
+        assert!(url.contains("order%2F42"));
+        assert!(url.contains("run%20id"));
     }
 }

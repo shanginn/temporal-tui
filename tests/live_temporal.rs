@@ -57,41 +57,52 @@ async fn live_dashboard_and_control_operations() {
         .unwrap()
         .as_nanos();
     let workflow_id = format!("temporal-tui-smoke-{suffix}");
-    run_cli(
-        &temporal_cli,
-        &[
-            "workflow",
-            "start",
-            "--address",
-            &address,
-            "--namespace",
-            "default",
-            "--workflow-id",
-            &workflow_id,
-            "--type",
-            "TemporalTuiSmokeWorkflow",
-            "--task-queue",
-            "temporal-tui-smoke",
-            "--static-summary",
-            "Temporal TUI live smoke test",
-            "--input",
-            r#"{"source":"temporal-tui"}"#,
-            "--output",
-            "none",
-        ],
-    );
+    let second_workflow_id = format!("temporal-tui-smoke-{suffix}-second");
+    start_smoke_workflow(&temporal_cli, &address, &workflow_id);
+    start_smoke_workflow(&temporal_cli, &address, &second_workflow_id);
+
+    let type_query = "WorkflowType = 'TemporalTuiSmokeWorkflow'";
+    let count = eventually(Duration::from_secs(10), || async {
+        service
+            .count_workflows("default", type_query)
+            .await
+            .ok()
+            .filter(|count| count.total >= 2)
+    })
+    .await
+    .expect("visibility count should include both smoke workflows");
+    assert!(count.total >= 2);
+    let first_page = service
+        .list_workflows("default", type_query, 1, Vec::new())
+        .await
+        .expect("first cursor page");
+    assert_eq!(first_page.workflows.len(), 1);
+    assert!(!first_page.next_page_token.is_empty());
+    let first_key = first_page.workflows[0].key.clone();
+    let second_page = service
+        .list_workflows("default", type_query, 1, first_page.next_page_token)
+        .await
+        .expect("second cursor page");
+    assert_eq!(second_page.workflows.len(), 1);
+    assert_ne!(first_key, second_page.workflows[0].key);
 
     let query = format!("WorkflowId = '{workflow_id}'");
     let workflow = eventually(Duration::from_secs(10), || async {
         service
-            .list_workflows("default", &query, 10)
+            .list_workflows("default", &query, 10, Vec::new())
             .await
             .ok()
-            .and_then(|workflows| workflows.into_iter().next())
+            .and_then(|page| page.workflows.into_iter().next())
     })
     .await
     .expect("started workflow should appear in visibility");
     assert_eq!(workflow.status, WorkflowStatus::Running);
+    let chain = service
+        .list_workflow_chain("default", &workflow_id)
+        .await
+        .expect("workflow chain");
+    assert_eq!(chain.len(), 1);
+    assert_eq!(chain[0].key.workflow_id, workflow_id);
 
     let details = service
         .describe_workflow("default", &workflow.key)
@@ -131,6 +142,61 @@ async fn live_dashboard_and_control_operations() {
         signaled.is_some(),
         "signal event should be visible in history"
     );
+    service
+        .signal_workflow(
+            "default",
+            &workflow.key,
+            "redaction-signal",
+            serde_json::json!({"customer":"Ada","credentials":{"api_key":"never-export"}}),
+        )
+        .await
+        .expect("signal sensitive payload");
+    for index in 0..205 {
+        service
+            .signal_workflow(
+                "default",
+                &workflow.key,
+                "pagination-signal",
+                serde_json::json!({"index": index}),
+            )
+            .await
+            .expect("signal for history pagination");
+    }
+
+    let first_history_page = service
+        .describe_workflow("default", &workflow.key)
+        .await
+        .expect("paginated workflow details");
+    assert!(
+        !first_history_page.history_next_page_token.is_empty(),
+        "history over 200 events should expose another cursor"
+    );
+    let mut all_events = first_history_page.events;
+    let mut history_token = first_history_page.history_next_page_token;
+    while !history_token.is_empty() {
+        let page = service
+            .load_history_page("default", &workflow.key, history_token)
+            .await
+            .expect("older history page");
+        all_events.extend(page.events);
+        history_token = page.next_page_token;
+    }
+    all_events.sort_by_key(|event| event.event_id);
+    all_events.dedup_by_key(|event| event.event_id);
+    assert!(
+        all_events
+            .iter()
+            .any(|event| event.event_type == "WORKFLOW EXECUTION STARTED")
+    );
+    let redacted_event = all_events
+        .iter()
+        .find(|event| event.detail == "redaction-signal")
+        .expect("redaction signal event");
+    assert!(redacted_event.fields.iter().any(|field| {
+        field.redacted
+            && field.value.contains("<redacted>")
+            && !field.value.contains("never-export")
+    }));
 
     service
         .cancel_workflow("default", &workflow.key, "live contract test")
@@ -160,10 +226,10 @@ async fn live_dashboard_and_control_operations() {
         .expect("terminate workflow");
     let terminated = eventually(Duration::from_secs(10), || async {
         service
-            .list_workflows("default", &query, 10)
+            .list_workflows("default", &query, 10, Vec::new())
             .await
             .ok()
-            .and_then(|workflows| workflows.into_iter().next())
+            .and_then(|page| page.workflows.into_iter().next())
             .filter(|workflow| workflow.status == WorkflowStatus::Terminated)
     })
     .await;
@@ -171,6 +237,24 @@ async fn live_dashboard_and_control_operations() {
         terminated.is_some(),
         "terminated workflow should reach terminal visibility state"
     );
+
+    let second = service
+        .list_workflows(
+            "default",
+            &format!("WorkflowId = '{second_workflow_id}'"),
+            10,
+            Vec::new(),
+        )
+        .await
+        .expect("second workflow visibility")
+        .workflows
+        .into_iter()
+        .next()
+        .expect("second workflow");
+    service
+        .terminate_workflow("default", &second.key, "live contract test cleanup")
+        .await
+        .expect("terminate second workflow");
 }
 
 fn temporal_cli() -> PathBuf {
@@ -247,6 +331,32 @@ fn run_cli(temporal_cli: &PathBuf, arguments: &[&str]) {
         "Temporal CLI failed:\nstdout: {}\nstderr: {}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn start_smoke_workflow(temporal_cli: &PathBuf, address: &str, workflow_id: &str) {
+    run_cli(
+        temporal_cli,
+        &[
+            "workflow",
+            "start",
+            "--address",
+            address,
+            "--namespace",
+            "default",
+            "--workflow-id",
+            workflow_id,
+            "--type",
+            "TemporalTuiSmokeWorkflow",
+            "--task-queue",
+            "temporal-tui-smoke",
+            "--static-summary",
+            "Temporal TUI live smoke test",
+            "--input",
+            r#"{"source":"temporal-tui"}"#,
+            "--output",
+            "none",
+        ],
     );
 }
 

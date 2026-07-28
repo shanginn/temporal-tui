@@ -1,15 +1,25 @@
-use std::{sync::Arc, time::Duration};
+use std::{
+    fs::{self, OpenOptions},
+    io::Write,
+    path::Path,
+    sync::Arc,
+    time::Duration,
+};
 
 use anyhow::{Context, Result};
+use chrono::Utc;
 use crossterm::event::{Event, EventStream, KeyEventKind};
+use directories::BaseDirs;
 use futures_util::StreamExt;
+use serde::Serialize;
 use tokio::{
     sync::mpsc,
     time::{MissedTickBehavior, interval},
 };
 
 use crate::{
-    app::{App, Command, Message, OperationKind},
+    app::{App, Command, Message, OperationKind, UtilityKind},
+    model::{ClusterInfo, WorkflowDetails},
     service::TemporalService,
     terminal::TerminalSession,
     ui,
@@ -125,11 +135,23 @@ async fn execute(command: Command, service: &dyn TemporalService) -> Message {
             request_id,
             namespace,
             query,
-            limit,
+            page_size,
+            next_page_token,
         } => Message::WorkflowsLoaded {
             request_id,
             result: service
-                .list_workflows(&namespace, &query, limit)
+                .list_workflows(&namespace, &query, page_size, next_page_token)
+                .await
+                .map_err(|error| error.to_string()),
+        },
+        Command::CountWorkflows {
+            request_id,
+            namespace,
+            query,
+        } => Message::WorkflowCountLoaded {
+            request_id,
+            result: service
+                .count_workflows(&namespace, &query)
                 .await
                 .map_err(|error| error.to_string()),
         },
@@ -141,6 +163,30 @@ async fn execute(command: Command, service: &dyn TemporalService) -> Message {
             request_id,
             result: service
                 .describe_workflow(&namespace, &key)
+                .await
+                .map(Box::new)
+                .map_err(|error| error.to_string()),
+        },
+        Command::LoadHistoryPage {
+            request_id,
+            namespace,
+            key,
+            next_page_token,
+        } => Message::HistoryPageLoaded {
+            request_id,
+            result: service
+                .load_history_page(&namespace, &key, next_page_token)
+                .await
+                .map_err(|error| error.to_string()),
+        },
+        Command::LoadWorkflowChain {
+            request_id,
+            namespace,
+            workflow_id,
+        } => Message::WorkflowChainLoaded {
+            request_id,
+            result: service
+                .list_workflow_chain(&namespace, &workflow_id)
                 .await
                 .map_err(|error| error.to_string()),
         },
@@ -184,5 +230,139 @@ async fn execute(command: Command, service: &dyn TemporalService) -> Message {
                 .await
                 .map_err(|error| error.to_string()),
         },
+        Command::Copy { request_id, text } => Message::UtilityFinished {
+            request_id,
+            operation: UtilityKind::Copy,
+            result: tokio::task::spawn_blocking(move || copy_to_clipboard(&text))
+                .await
+                .map_err(|error| format!("clipboard task failed: {error}"))
+                .and_then(std::convert::identity),
+        },
+        Command::Export {
+            request_id,
+            namespace,
+            cluster,
+            details,
+        } => Message::UtilityFinished {
+            request_id,
+            operation: UtilityKind::Export,
+            result: tokio::task::spawn_blocking(move || {
+                export_workflow(&namespace, cluster.as_ref(), &details)
+            })
+            .await
+            .map_err(|error| format!("export task failed: {error}"))
+            .and_then(std::convert::identity),
+        },
+        Command::OpenWeb { request_id, url } => Message::UtilityFinished {
+            request_id,
+            operation: UtilityKind::OpenWeb,
+            result: tokio::task::spawn_blocking(move || {
+                open::that_detached(&url)
+                    .map(|()| url)
+                    .map_err(|error| format!("could not open Temporal Web UI: {error}"))
+            })
+            .await
+            .map_err(|error| format!("open task failed: {error}"))
+            .and_then(std::convert::identity),
+        },
+    }
+}
+
+fn copy_to_clipboard(text: &str) -> Result<String, String> {
+    let mut clipboard =
+        arboard::Clipboard::new().map_err(|error| format!("could not open clipboard: {error}"))?;
+    clipboard
+        .set_text(text)
+        .map_err(|error| format!("could not copy to clipboard: {error}"))?;
+    Ok(text.to_string())
+}
+
+#[derive(Serialize)]
+struct WorkflowExport<'a> {
+    schema_version: u32,
+    exported_at: chrono::DateTime<Utc>,
+    namespace: &'a str,
+    cluster: Option<&'a ClusterInfo>,
+    redaction: &'static str,
+    workflow: &'a WorkflowDetails,
+}
+
+fn export_workflow(
+    namespace: &str,
+    cluster: Option<&ClusterInfo>,
+    details: &WorkflowDetails,
+) -> Result<String, String> {
+    let base =
+        BaseDirs::new().ok_or_else(|| "could not determine the user data directory".to_string())?;
+    let directory = base.data_local_dir().join("temporal-tui").join("exports");
+    fs::create_dir_all(&directory)
+        .map_err(|error| format!("could not create {}: {error}", directory.display()))?;
+
+    let workflow_id = safe_filename_component(&details.summary.key.workflow_id);
+    let run_id = safe_filename_component(&details.summary.key.run_id);
+    let timestamp = Utc::now().format("%Y%m%dT%H%M%SZ");
+    let filename = format!("{workflow_id}-{run_id}-{timestamp}.json");
+    let path = directory.join(filename);
+    let export = WorkflowExport {
+        schema_version: 1,
+        exported_at: Utc::now(),
+        namespace,
+        cluster,
+        redaction: "fields with sensitive names are replaced by <redacted>",
+        workflow: details,
+    };
+    let bytes = serde_json::to_vec_pretty(&export)
+        .map_err(|error| format!("could not serialize workflow export: {error}"))?;
+    write_new_private_file(&path, &bytes)?;
+    Ok(path.display().to_string())
+}
+
+fn safe_filename_component(value: &str) -> String {
+    let mut result = value
+        .chars()
+        .take(80)
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.') {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    if result.is_empty() || result == "." || result == ".." {
+        result = "workflow".to_string();
+    }
+    result
+}
+
+fn write_new_private_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(path)
+        .map_err(|error| format!("could not create {}: {error}", path.display()))?;
+    file.write_all(bytes)
+        .map_err(|error| format!("could not write {}: {error}", path.display()))?;
+    file.sync_all()
+        .map_err(|error| format!("could not sync {}: {error}", path.display()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn export_filename_components_cannot_escape_directory() {
+        assert_eq!(
+            safe_filename_component("../../orders/42"),
+            ".._.._orders_42"
+        );
+        assert_eq!(safe_filename_component(""), "workflow");
+        assert_eq!(safe_filename_component("valid-id"), "valid-id");
     }
 }

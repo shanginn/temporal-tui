@@ -13,7 +13,7 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::{
     app::{App, ConfirmAction, Focus, NoticeKind, Overlay, SignalField, SignalForm, TextInput},
-    model::WorkflowStatus,
+    model::{FailureSummary, StructuredField, WorkflowStatus},
 };
 
 const MIN_WIDTH: u16 = 58;
@@ -42,15 +42,28 @@ pub fn render(frame: &mut Frame<'_>, app: &App) {
         match overlay {
             Overlay::Help => render_help(frame, area, theme),
             Overlay::Query(input) => render_query(frame, area, input, theme),
+            Overlay::SavedQueryPicker { selected } => {
+                render_saved_queries(frame, area, app, *selected, theme);
+            }
+            Overlay::Aggregations { selected } => {
+                render_aggregations(frame, area, app, *selected, theme);
+            }
             Overlay::NamespacePicker { selected } => {
                 render_namespaces(frame, area, app, *selected, theme);
             }
             Overlay::Confirm {
                 action,
                 workflow_id,
+                input,
                 ..
-            } => render_confirmation(frame, area, *action, workflow_id, theme),
+            } => render_confirmation(frame, area, *action, workflow_id, input, theme),
             Overlay::Signal(form) => render_signal(frame, area, form, theme),
+            Overlay::WorkflowChain { selected } => {
+                render_workflow_chain(frame, area, app, *selected, theme);
+            }
+            Overlay::Inspector { scroll } => {
+                render_inspector(frame, area, app, *scroll, theme);
+            }
         }
     }
 }
@@ -85,6 +98,19 @@ fn render_header(frame: &mut Frame<'_>, app: &App, area: Rect, theme: Theme) {
         Span::raw("  "),
         Span::raw(refresh),
         Span::raw("  "),
+        Span::styled(
+            if app.read_only {
+                "READ ONLY"
+            } else {
+                "CONTROL"
+            },
+            if app.read_only {
+                theme.warning()
+            } else {
+                theme.success()
+            },
+        ),
+        Span::raw("  "),
         Span::styled(query, theme.muted()),
     ]);
     let block = Block::default()
@@ -92,9 +118,15 @@ fn render_header(frame: &mut Frame<'_>, app: &App, area: Rect, theme: Theme) {
         .border_style(theme.border(false))
         .title(Span::styled(" temporal-tui ", theme.title()))
         .title_bottom(
-            Line::from(format!(" {} ", app.address))
-                .alignment(Alignment::Right)
-                .style(theme.muted()),
+            Line::from(format!(
+                " {}{} ",
+                app.profile_name
+                    .as_ref()
+                    .map_or_else(String::new, |name| format!("profile/{name} · ")),
+                app.address
+            ))
+            .alignment(Alignment::Right)
+            .style(theme.muted()),
         );
     frame.render_widget(Paragraph::new(line).block(block), area);
 }
@@ -115,10 +147,14 @@ fn render_dashboard(frame: &mut Frame<'_>, app: &App, area: Rect, theme: Theme) 
 }
 
 fn render_workflows(frame: &mut Frame<'_>, app: &App, area: Rect, theme: Theme) {
+    let count = app.workflow_count.as_ref().map_or_else(
+        || app.workflows.len().to_string(),
+        |count| format!("≈{}", count.total),
+    );
     let title = if app.loading_workflows {
-        format!(" Workflows ({}) ⟳ ", app.workflows.len())
+        format!(" Workflows ({count}) · page {} ⟳ ", app.page_number)
     } else {
-        format!(" Workflows ({}) ", app.workflows.len())
+        format!(" Workflows ({count}) · page {} ", app.page_number)
     };
     let rows = app.workflows.iter().map(|workflow| {
         Row::new(vec![
@@ -245,16 +281,14 @@ fn render_details(frame: &mut Frame<'_>, app: &App, area: Rect, theme: Theme) {
             .borders(Borders::ALL)
             .border_style(theme.border(app.focus == Focus::History))
             .title(Span::styled(
-                if usize::try_from(details.summary.history_length)
-                    .is_ok_and(|total| total > details.events.len())
-                {
+                if details.history_next_page_token.is_empty() {
+                    format!(" History ({}) ", details.events.len())
+                } else {
                     format!(
-                        " History (latest {} of {}) ",
+                        " History (loaded {} of {} · H older) ",
                         details.events.len(),
                         details.summary.history_length
                     )
-                } else {
-                    format!(" History ({}) ", details.events.len())
                 },
                 theme.title(),
             )),
@@ -307,9 +341,13 @@ fn render_footer(frame: &mut Frame<'_>, app: &App, area: Rect, theme: Theme) {
             Span::raw("  "),
             key_hint("n", "namespace", theme),
             Span::raw("  "),
-            key_hint("s", "signal", theme),
+            key_hint("[/]", "pages", theme),
             Span::raw("  "),
-            key_hint("c/x", "cancel/terminate", theme),
+            key_hint("v", "inspect", theme),
+            Span::raw("  "),
+            key_hint("f", "filters", theme),
+            Span::raw("  "),
+            key_hint("e/o", "export/web", theme),
             Span::raw("  "),
             key_hint("?", "help", theme),
             Span::raw("  "),
@@ -320,7 +358,7 @@ fn render_footer(frame: &mut Frame<'_>, app: &App, area: Rect, theme: Theme) {
 }
 
 fn render_help(frame: &mut Frame<'_>, area: Rect, theme: Theme) {
-    let popup = centered(area, 76, 24);
+    let popup = centered(area, 82, 32);
     frame.render_widget(Clear, popup);
     let help = Text::from(vec![
         help_section("NAVIGATION", theme),
@@ -328,12 +366,24 @@ fn render_help(frame: &mut Frame<'_>, area: Rect, theme: Theme) {
         help_line("k / ↑", "previous workflow or history event", theme),
         help_line("g / G", "first / last item", theme),
         help_line("tab / enter", "switch workflow and history panes", theme),
+        help_line("[ / ]", "previous / next workflow page", theme),
         Line::default(),
         help_section("DATA", theme),
         help_line("/", "edit Temporal visibility query", theme),
+        help_line("f", "select a saved visibility query", theme),
+        help_line("#", "show GROUP BY visibility counts", theme),
         help_line("n", "switch namespace", theme),
         help_line("r", "refresh now", theme),
         help_line("a", "toggle automatic refresh", theme),
+        help_line("H", "load the next older history page", theme),
+        help_line("C", "show all runs in this workflow chain", theme),
+        help_line(
+            "v",
+            "inspect payloads, failures, memo, and attributes",
+            theme,
+        ),
+        help_line("y", "copy workflow and run IDs", theme),
+        help_line("e / o", "safe JSON export / open Temporal Web UI", theme),
         Line::default(),
         help_section("CONTROL", theme),
         help_line("s", "send a named signal with JSON input", theme),
@@ -377,6 +427,87 @@ fn render_query(frame: &mut Frame<'_>, area: Rect, input: &TextInput, theme: The
     set_input_cursor(frame, popup, input, horizontal_offset);
 }
 
+fn render_saved_queries(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &App,
+    selected: usize,
+    theme: Theme,
+) {
+    let visible = app.saved_queries.len().clamp(3, 18);
+    let popup = centered(
+        area,
+        92,
+        u16::try_from(visible).unwrap_or(18).saturating_add(4),
+    );
+    frame.render_widget(Clear, popup);
+    let items = app.saved_queries.iter().map(|filter| {
+        ListItem::new(Line::from(vec![
+            Span::styled(format!("{:<24}", filter.name), theme.strong()),
+            Span::styled(&filter.query, theme.muted()),
+        ]))
+    });
+    let list = List::new(items)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(theme.accent())
+                .title(Span::styled(" Saved visibility queries ", theme.title()))
+                .title_bottom(
+                    Line::from(" enter apply · esc cancel ")
+                        .alignment(Alignment::Right)
+                        .style(theme.muted()),
+                ),
+        )
+        .highlight_style(theme.selection())
+        .highlight_symbol("› ");
+    let mut state = ListState::default().with_selected(Some(selected));
+    frame.render_stateful_widget(list, popup, &mut state);
+}
+
+fn render_aggregations(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &App,
+    selected: usize,
+    theme: Theme,
+) {
+    let groups = app
+        .workflow_count
+        .as_ref()
+        .map_or(&[][..], |count| count.groups.as_slice());
+    let visible = groups.len().clamp(3, 20);
+    let popup = centered(
+        area,
+        84,
+        u16::try_from(visible).unwrap_or(20).saturating_add(5),
+    );
+    frame.render_widget(Clear, popup);
+    let rows = groups.iter().map(|group| {
+        Row::new(vec![
+            Cell::from(group.values.join(" · ")),
+            Cell::from(group.count.to_string()),
+        ])
+    });
+    let table = Table::new(rows, [Constraint::Fill(1), Constraint::Length(14)])
+        .header(Row::new(["GROUP VALUES", "COUNT"]).style(theme.table_header()))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(theme.accent())
+                .title(Span::styled(" Visibility aggregation ", theme.title()))
+                .title_bottom(
+                    Line::from(" j/k navigate · esc close ")
+                        .alignment(Alignment::Right)
+                        .style(theme.muted()),
+                ),
+        )
+        .row_highlight_style(theme.selection())
+        .highlight_symbol("› ");
+    let mut state = TableState::default().with_selected((!groups.is_empty()).then_some(selected));
+    frame.render_stateful_widget(table, popup, &mut state);
+}
+
 fn render_namespaces(frame: &mut Frame<'_>, area: Rect, app: &App, selected: usize, theme: Theme) {
     let visible_namespaces = app.namespaces.len().clamp(3, 20);
     let height = u16::try_from(visible_namespaces).unwrap_or(20) + 4;
@@ -413,14 +544,233 @@ fn render_namespaces(frame: &mut Frame<'_>, area: Rect, app: &App, selected: usi
     frame.render_stateful_widget(list, popup, &mut state);
 }
 
+fn render_workflow_chain(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &App,
+    selected: usize,
+    theme: Theme,
+) {
+    let visible = app.workflow_chain.len().clamp(3, 20);
+    let popup = centered(
+        area,
+        104,
+        u16::try_from(visible).unwrap_or(20).saturating_add(5),
+    );
+    frame.render_widget(Clear, popup);
+    let rows = app.workflow_chain.iter().map(|workflow| {
+        Row::new(vec![
+            Cell::from(workflow.status.label()).style(theme.workflow_status(workflow.status)),
+            Cell::from(workflow.key.run_id.clone()),
+            Cell::from(format_time(workflow.start_time.as_ref())),
+            Cell::from(format_count(workflow.history_length)),
+        ])
+    });
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Length(12),
+            Constraint::Fill(3),
+            Constraint::Length(17),
+            Constraint::Length(8),
+        ],
+    )
+    .header(Row::new(["STATUS", "RUN ID", "STARTED", "EVENTS"]).style(theme.table_header()))
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(theme.accent())
+            .title(Span::styled(
+                format!(" Workflow chain ({}) ", app.workflow_chain.len()),
+                theme.title(),
+            ))
+            .title_bottom(
+                Line::from(" j/k navigate · esc close ")
+                    .alignment(Alignment::Right)
+                    .style(theme.muted()),
+            ),
+    )
+    .row_highlight_style(theme.selection())
+    .highlight_symbol("› ");
+    let mut state =
+        TableState::default().with_selected((!app.workflow_chain.is_empty()).then_some(selected));
+    frame.render_stateful_widget(table, popup, &mut state);
+}
+
+fn render_inspector(frame: &mut Frame<'_>, area: Rect, app: &App, scroll: u16, theme: Theme) {
+    let popup = centered(area, 112, area.height.saturating_sub(4).clamp(12, 44));
+    frame.render_widget(Clear, popup);
+    let mut lines = Vec::new();
+    if let Some(details) = &app.details {
+        lines.push(inspector_section("WORKFLOW", theme));
+        lines.push(inspector_value("First run", &details.first_run_id, theme));
+        if let Some(parent) = &details.parent_workflow_id {
+            lines.push(inspector_value("Parent", parent, theme));
+        }
+        if let Some(root) = &details.root_workflow_id {
+            lines.push(inspector_value("Root", root, theme));
+        }
+        if let Some(reset) = &details.reset_run_id {
+            lines.push(inspector_value("Reset run", reset, theme));
+        }
+        if let Some(static_details) = &details.static_details {
+            lines.push(inspector_value("Details", static_details, theme));
+        }
+        if details.cancel_requested {
+            lines.push(Line::from("Cancellation has been requested").style(theme.warning()));
+        }
+        append_structured_fields(&mut lines, "MEMO", &details.memo, theme);
+        append_structured_fields(
+            &mut lines,
+            "SEARCH ATTRIBUTES",
+            &details.search_attributes,
+            theme,
+        );
+
+        if !details.pending_activity_details.is_empty() {
+            lines.push(Line::default());
+            lines.push(inspector_section("PENDING ACTIVITIES", theme));
+            for activity in &details.pending_activity_details {
+                lines.push(Line::from(vec![
+                    Span::styled(activity.activity_id.clone(), theme.strong()),
+                    Span::raw(" · "),
+                    Span::raw(activity.activity_type.clone()),
+                    Span::raw(" · "),
+                    Span::styled(activity.state.clone(), theme.warning()),
+                    Span::raw(format!(" · attempt {}", activity.attempt)),
+                ]));
+                if let Some(failure) = &activity.last_failure {
+                    append_failure(&mut lines, failure, 1, theme);
+                }
+            }
+        }
+
+        if let Some(event) = details.events.get(app.selected_event) {
+            lines.push(Line::default());
+            lines.push(inspector_section(
+                &format!("EVENT {} · {}", event.event_id, event.event_type),
+                theme,
+            ));
+            if !event.detail.is_empty() {
+                lines.push(inspector_value("Detail", &event.detail, theme));
+            }
+            for field in &event.fields {
+                append_structured_field(&mut lines, field, theme);
+            }
+            if let Some(failure) = &event.failure {
+                lines.push(Line::default());
+                lines.push(inspector_section("FAILURE", theme));
+                append_failure(&mut lines, failure, 0, theme);
+            }
+        }
+    }
+    if lines.is_empty() {
+        lines.push(Line::from("No workflow detail is available").style(theme.muted()));
+    }
+    let paragraph = Paragraph::new(Text::from(lines))
+        .scroll((scroll, 0))
+        .wrap(Wrap { trim: false })
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(theme.accent())
+                .title(Span::styled(" Workflow inspector ", theme.title()))
+                .title_bottom(
+                    Line::from(" j/k or page up/down scroll · esc close ")
+                        .alignment(Alignment::Right)
+                        .style(theme.muted()),
+                )
+                .padding(Padding::horizontal(1)),
+        );
+    frame.render_widget(paragraph, popup);
+}
+
+fn append_structured_fields(
+    lines: &mut Vec<Line<'static>>,
+    title: &str,
+    fields: &[StructuredField],
+    theme: Theme,
+) {
+    if fields.is_empty() {
+        return;
+    }
+    lines.push(Line::default());
+    lines.push(inspector_section(title, theme));
+    for field in fields {
+        append_structured_field(lines, field, theme);
+    }
+}
+
+fn append_structured_field(lines: &mut Vec<Line<'static>>, field: &StructuredField, theme: Theme) {
+    lines.push(Line::from(vec![
+        Span::styled(field.name.clone(), theme.strong()),
+        Span::styled(
+            format!("  {} · {} bytes", field.encoding, field.size_bytes),
+            theme.muted(),
+        ),
+    ]));
+    lines.extend(field.value.lines().map(|line| {
+        Line::from(format!("  {line}")).style(if field.redacted {
+            theme.warning()
+        } else {
+            theme.muted()
+        })
+    }));
+}
+
+fn append_failure(
+    lines: &mut Vec<Line<'static>>,
+    failure: &FailureSummary,
+    depth: usize,
+    theme: Theme,
+) {
+    let indent = "  ".repeat(depth);
+    lines.push(Line::from(vec![
+        Span::styled(format!("{indent}{}", failure.kind), theme.error()),
+        Span::raw(if failure.source.is_empty() {
+            String::new()
+        } else {
+            format!(" · {}", failure.source)
+        }),
+    ]));
+    lines.push(Line::from(format!("{indent}{}", failure.message)));
+    if let Some(attributes) = &failure.encoded_attributes {
+        append_structured_field(lines, attributes, theme);
+    }
+    if !failure.stack_trace.is_empty() {
+        lines.extend(
+            failure
+                .stack_trace
+                .lines()
+                .map(|line| Line::from(format!("{indent}  {line}")).style(theme.muted())),
+        );
+    }
+    if let Some(cause) = &failure.cause {
+        lines.push(Line::from(format!("{indent}Caused by:")).style(theme.muted()));
+        append_failure(lines, cause, depth.saturating_add(1), theme);
+    }
+}
+
+fn inspector_section(title: &str, theme: Theme) -> Line<'static> {
+    Line::from(title.to_string()).style(theme.title())
+}
+
+fn inspector_value(label: &str, value: &str, theme: Theme) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(format!("{label:<12}"), theme.muted()),
+        Span::raw(value.to_string()),
+    ])
+}
+
 fn render_confirmation(
     frame: &mut Frame<'_>,
     area: Rect,
     action: ConfirmAction,
     workflow_id: &str,
+    input: &TextInput,
     theme: Theme,
 ) {
-    let popup = centered(area, 76, 8);
+    let popup = centered(area, 80, 11);
     frame.render_widget(Clear, popup);
     let severity = match action {
         ConfirmAction::Cancel => theme.warning(),
@@ -444,22 +794,32 @@ fn render_confirmation(
         ]),
         Line::default(),
         Line::from(warning).style(theme.muted()),
-        Line::from(vec![
-            Span::styled(" y ", severity.add_modifier(Modifier::BOLD)),
-            Span::raw(" confirm   "),
-            Span::styled(" n / esc ", theme.key()),
-            Span::raw(" cancel"),
-        ]),
     ]);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(severity)
+        .title(Span::styled(" Confirmation ", severity))
+        .title_bottom(
+            Line::from(" type Workflow ID exactly · enter confirm · esc cancel ")
+                .alignment(Alignment::Right)
+                .style(theme.muted()),
+        );
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+    let areas = Layout::vertical([Constraint::Length(4), Constraint::Length(3)]).split(inner);
+    frame.render_widget(Paragraph::new(text).wrap(Wrap { trim: true }), areas[0]);
+    let input_block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(severity)
+        .title(Span::styled(" Workflow ID ", theme.strong()));
+    let horizontal_offset = input_horizontal_offset(input, areas[1].width.saturating_sub(2));
     frame.render_widget(
-        Paragraph::new(text).wrap(Wrap { trim: true }).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(severity)
-                .title(Span::styled(" Confirmation ", severity)),
-        ),
-        popup,
+        Paragraph::new(input.value.as_str())
+            .scroll((0, horizontal_offset))
+            .block(input_block),
+        areas[1],
     );
+    set_input_cursor(frame, areas[1], input, horizontal_offset);
 }
 
 fn render_signal(frame: &mut Frame<'_>, area: Rect, form: &SignalForm, theme: Theme) {
@@ -737,18 +1097,25 @@ mod tests {
     use super::*;
     use crate::{
         app::{AppConfig, Overlay},
-        model::{ClusterInfo, HistoryEventSummary, WorkflowDetails, WorkflowKey, WorkflowSummary},
+        model::{
+            ClusterInfo, HistoryEventSummary, StructuredField, WorkflowCount, WorkflowCountGroup,
+            WorkflowDetails, WorkflowKey, WorkflowSummary,
+        },
     };
 
     fn sample_app() -> App {
         let mut app = App::new(AppConfig {
             address: "localhost:7233".to_string(),
+            profile_name: Some("dev".to_string()),
             namespace: "default".to_string(),
             query: String::new(),
             page_size: 200,
             refresh_interval: Duration::from_secs(5),
             auto_refresh: true,
             color: true,
+            read_only: false,
+            web_ui_url: Some("http://localhost:8233".to_string()),
+            saved_queries: Vec::new(),
         });
         app.cluster = Some(ClusterInfo {
             cluster_name: "dev".to_string(),
@@ -773,18 +1140,30 @@ mod tests {
             summary,
             first_run_id: "run-abc".to_string(),
             parent_workflow_id: None,
+            parent_run_id: None,
+            root_workflow_id: None,
+            root_run_id: None,
+            reset_run_id: None,
+            cancel_requested: false,
             pending_activities: 1,
+            pending_activity_details: Vec::new(),
             pending_children: 0,
             pending_nexus_operations: 0,
             state_transition_count: 5,
             static_summary: Some("Process order".to_string()),
             static_details: None,
+            memo: Vec::new(),
+            search_attributes: Vec::new(),
             events: vec![HistoryEventSummary {
                 event_id: 1,
                 event_type: "WORKFLOW EXECUTION STARTED".to_string(),
                 event_time: Some(Utc.with_ymd_and_hms(2026, 7, 27, 8, 0, 0).unwrap()),
                 detail: "OrderWorkflow · orders".to_string(),
+                fields: Vec::new(),
+                failure: None,
             }],
+            history_next_page_token: Vec::new(),
+            history_archived: false,
         });
         app
     }
@@ -821,11 +1200,41 @@ mod tests {
             action: ConfirmAction::Terminate,
             key: app.workflows[0].key.clone(),
             workflow_id: "order-42".to_string(),
+            input: TextInput::default(),
         });
         let output = rendered(&app, 120, 32);
         assert!(output.contains("Termination is immediate"));
         assert!(output.contains("order-42"));
         assert!(output.contains("confirm"));
+    }
+
+    #[test]
+    fn renders_payload_inspector_and_aggregations() {
+        let mut app = sample_app();
+        app.details.as_mut().unwrap().memo.push(StructuredField {
+            name: "api_key".to_string(),
+            encoding: "json/plain".to_string(),
+            value: "<redacted>".to_string(),
+            size_bytes: 12,
+            redacted: true,
+        });
+        app.overlay = Some(Overlay::Inspector { scroll: 0 });
+        let inspector = rendered(&app, 130, 40);
+        assert!(inspector.contains("Workflow inspector"));
+        assert!(inspector.contains("MEMO"));
+        assert!(inspector.contains("<redacted>"));
+
+        app.workflow_count = Some(WorkflowCount {
+            total: 2,
+            groups: vec![WorkflowCountGroup {
+                values: vec!["FAILED".to_string()],
+                count: 2,
+            }],
+        });
+        app.overlay = Some(Overlay::Aggregations { selected: 0 });
+        let aggregation = rendered(&app, 120, 32);
+        assert!(aggregation.contains("Visibility aggregation"));
+        assert!(aggregation.contains("FAILED"));
     }
 
     #[test]

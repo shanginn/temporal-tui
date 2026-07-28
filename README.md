@@ -7,10 +7,19 @@ required at runtime.
 
 ## Capabilities
 
-- Browse workflow visibility results with any Temporal visibility query.
-- Inspect workflow metadata, pending work, and the latest 200 history events.
+- Browse workflow visibility results with server-backed cursor pagination,
+  approximate counts, and `GROUP BY` aggregations.
+- Inspect full paginated history, failure causes and stacks, payloads, memo,
+  Search Attributes, pending Activities, and every run in a Workflow chain.
 - Discover and switch namespaces without reconnecting.
 - Refresh manually or automatically.
+- Use named connection profiles and saved visibility queries.
+- Store API keys in macOS Keychain, Windows Credential Manager, Linux Secret
+  Service, or resolve them from an environment variable. Secret material is
+  never written to the profile file.
+- Run in enforced read-only mode.
+- Copy Workflow identity, export a redacted JSON diagnostic bundle, or open the
+  exact run in Temporal Web UI.
 - Send a named signal with JSON input.
 - Request graceful cancellation or terminate an exact workflow run.
 - Connect to a local cluster, self-hosted Temporal, or Temporal Cloud with API
@@ -18,7 +27,8 @@ required at runtime.
 - Restore raw mode, the cursor, and the alternate screen on normal and error
   exits.
 
-Cancellation and termination always require an explicit `y` confirmation.
+Cancellation and termination require typing the exact Workflow ID and are
+unavailable in read-only mode.
 Mutation commands retain both the workflow ID and run ID selected when the
 confirmation opened, so a refresh cannot redirect an action to a different run.
 
@@ -42,7 +52,7 @@ Install directly from GitHub:
 cargo install --locked --git https://github.com/shanginn/temporal-tui
 ```
 
-This initial version pins Ratatui 0.30.2, Crossterm 0.29.0,
+This version pins Ratatui 0.30.2, Crossterm 0.29.0,
 `temporalio-client` 0.5.0, Tokio 1.53.1, and Temporal CLI 1.8.1. The official
 Temporal Rust client is currently marked **Public Preview**, so review its
 [support status](https://github.com/temporalio/sdk-rust) before adopting this
@@ -83,6 +93,33 @@ Run `temporal-tui --help` for visibility-query, refresh, page-size, TLS, and
 custom-header options. Values read from API-key and private-key environment
 variables are not echoed in the generated help.
 
+### Connection profiles
+
+Profiles live in the platform config directory (`temporal-tui config-path`
+prints the exact file). Create and select one:
+
+```sh
+temporal-tui profile create cloud \
+  --address your-namespace.account.tmprl.cloud:7233 \
+  --namespace your-namespace \
+  --tls \
+  --web-ui-url https://cloud.temporal.io \
+  --set-default
+temporal-tui profile set-api-key cloud
+temporal-tui --profile cloud
+```
+
+`profile set-api-key` reads without terminal echo and stores the value in the
+operating-system credential manager. For headless environments, use
+`profile create ... --api-key-env TEMPORAL_API_KEY`.
+
+Save reusable Visibility queries without hand-editing TOML:
+
+```sh
+temporal-tui filter save failures \
+  "ExecutionStatus = 'Failed' AND StartTime > '2026-07-27T00:00:00Z'"
+```
+
 ## Keyboard controls
 
 | Key | Action |
@@ -91,9 +128,17 @@ variables are not echoed in the generated help.
 | `g` / `G`, home / end | Jump to first or last item |
 | `tab` / `enter` | Switch between workflow and history panes |
 | `/` | Edit the Temporal visibility query |
+| `f` | Select a saved visibility query |
+| `#` | Show `GROUP BY` counts |
 | `n` | Switch namespace |
+| `[` / `]` | Previous / next workflow page |
 | `r` | Refresh now |
 | `a` | Toggle automatic refresh |
+| `H` | Load the next older history page |
+| `C` | Show the Workflow chain |
+| `v` | Inspect payloads, failures, memo, and Search Attributes |
+| `y` | Copy Workflow ID and Run ID |
+| `e` / `o` | Export redacted JSON / open Temporal Web UI |
 | `s` | Send a signal with JSON input |
 | `c` | Request workflow cancellation |
 | `x` | Terminate a workflow |
@@ -109,8 +154,9 @@ scripts/check.sh
 ```
 
 The live contract test starts an ephemeral Temporal dev server and verifies
-cluster discovery, namespaces, visibility, describe/history, signal, cancel,
-and terminate through the real gRPC adapter:
+cluster discovery, namespaces, visibility cursors and counts, complete history
+pagination, payload redaction, Workflow chains, signal, cancel, and terminate
+through the real gRPC adapter:
 
 ```sh
 scripts/install-temporal-cli.sh
