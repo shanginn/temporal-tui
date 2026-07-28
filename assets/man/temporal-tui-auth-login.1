@@ -1,0 +1,37 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH temporal-tui-auth-login 1  "login "
+.SH NAME
+temporal\-tui\-auth\-login \- Sign in with a local username and a password read without echo
+.SH SYNOPSIS
+\fBtemporal\-tui auth login\fR [\fB\-\-config\fR] [\fB\-\-url\fR] [\fB\-\-profile\fR] [\fB\-\-username\fR] [\fB\-\-address\fR] [\fB\-n\fR|\fB\-\-namespace\fR] [\fB\-\-password\-stdin\fR] [\fB\-\-set\-default\fR] [\fB\-h\fR|\fB\-\-help\fR]
+.SH DESCRIPTION
+Sign in with a local username and a password read without echo
+.SH OPTIONS
+.TP
+\fB\-\-config\fR \fI<CONFIG>\fR
+Alternate config file. Defaults to the platform user config directory
+.TP
+\fB\-\-url\fR \fI<URL>\fR
+Temporal auth base URL
+.TP
+\fB\-\-profile\fR \fI<PROFILE>\fR
+Named connection profile
+.TP
+\fB\-\-username\fR \fI<USERNAME>\fR
+Local username. Prompted when omitted
+.TP
+\fB\-\-address\fR \fI<ADDRESS>\fR
+Temporal gRPC address override when the auth service does not advertise one
+.TP
+\fB\-n\fR, \fB\-\-namespace\fR \fI<NAMESPACE>\fR
+Namespace stored in a newly created profile
+.TP
+\fB\-\-password\-stdin\fR
+Read the password from stdin instead of a terminal prompt
+.TP
+\fB\-\-set\-default\fR
+Make the selected profile the default
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help

@@ -65,9 +65,22 @@ the disposable-server contract both pass.
 - Threat model, operations, troubleshooting, accessibility, and automated
   clean install/upgrade/uninstall verification.
 
+### v1.1 — protected self-hosted login
+
+- Native `auth login`, `auth whoami`, and revoke-before-delete `auth logout`
+  commands with masked input and a stdin automation path.
+- Direct authenticated Temporal gRPC sessions without a wrapper, plugin, or
+  Temporal CLI runtime dependency.
+- Memory-only short-lived access tokens and rotating refresh credentials kept
+  only in the operating-system credential manager.
+- Origin/user-bound credentials with cross-process coordination for one-time
+  refresh rotation.
+- HTTPS, redirect/same-origin, loopback-development, config schema-3 migration,
+  and isolated authentication acceptance contracts.
+
 ## Next
 
-### v1.1 — operator ergonomics
+### v1.x — operator ergonomics
 
 - User-defined column layouts and compact saved dashboard presets.
 - Optional structured tracing export with explicit redaction policy.
@@ -86,7 +99,8 @@ the disposable-server contract both pass.
   namespace and target.
 - Destructive or broad operations show a preview and require typed
   confirmation.
-- Secrets never enter config files, diagnostic exports, fixtures, logs, or Git.
+- Passwords and access/refresh tokens never enter config files, diagnostic
+  exports, fixtures, logs, or Git.
 - Tests never use or mutate a user-owned Temporal server.
 - A release requires formatting, strict Clippy, unit/state/UI tests, optimized
   locked build, disposable Temporal live contract, and PTY terminal-restoration

@@ -47,6 +47,7 @@ set edit:completion:arg-completer[temporal-tui] = {|@words|
             cand --version 'Print version'
             cand profile 'Manage connection profiles'
             cand filter 'Manage saved visibility queries'
+            cand auth 'Sign in to a protected self-hosted Temporal deployment'
             cand config-path 'Print the active config path'
             cand help 'Print this message or the help of the given subcommand(s)'
         }
@@ -196,6 +197,56 @@ set edit:completion:arg-completer[temporal-tui] = {|@words|
         }
         &'temporal-tui;filter;help;help'= {
         }
+        &'temporal-tui;auth'= {
+            cand --config 'Alternate config file. Defaults to the platform user config directory'
+            cand --profile 'Named connection profile'
+            cand -h 'Print help'
+            cand --help 'Print help'
+            cand login 'Sign in with a local username and a password read without echo'
+            cand whoami 'Show the current signed-in identity and session status'
+            cand logout 'Revoke the refresh grant and remove its local credential'
+            cand help 'Print this message or the help of the given subcommand(s)'
+        }
+        &'temporal-tui;auth;login'= {
+            cand --url 'Temporal auth base URL'
+            cand --username 'Local username. Prompted when omitted'
+            cand --address 'Temporal gRPC address override when the auth service does not advertise one'
+            cand -n 'Namespace stored in a newly created profile'
+            cand --namespace 'Namespace stored in a newly created profile'
+            cand --config 'Alternate config file. Defaults to the platform user config directory'
+            cand --profile 'Named connection profile'
+            cand --password-stdin 'Read the password from stdin instead of a terminal prompt'
+            cand --allow-http 'Permit loopback-only HTTP for local development and tests'
+            cand --set-default 'Make the selected profile the default'
+            cand -h 'Print help'
+            cand --help 'Print help'
+        }
+        &'temporal-tui;auth;whoami'= {
+            cand --config 'Alternate config file. Defaults to the platform user config directory'
+            cand --profile 'Named connection profile'
+            cand -h 'Print help'
+            cand --help 'Print help'
+        }
+        &'temporal-tui;auth;logout'= {
+            cand --config 'Alternate config file. Defaults to the platform user config directory'
+            cand --profile 'Named connection profile'
+            cand -h 'Print help'
+            cand --help 'Print help'
+        }
+        &'temporal-tui;auth;help'= {
+            cand login 'Sign in with a local username and a password read without echo'
+            cand whoami 'Show the current signed-in identity and session status'
+            cand logout 'Revoke the refresh grant and remove its local credential'
+            cand help 'Print this message or the help of the given subcommand(s)'
+        }
+        &'temporal-tui;auth;help;login'= {
+        }
+        &'temporal-tui;auth;help;whoami'= {
+        }
+        &'temporal-tui;auth;help;logout'= {
+        }
+        &'temporal-tui;auth;help;help'= {
+        }
         &'temporal-tui;config-path'= {
             cand --config 'Alternate config file. Defaults to the platform user config directory'
             cand --profile 'Named connection profile'
@@ -205,6 +256,7 @@ set edit:completion:arg-completer[temporal-tui] = {|@words|
         &'temporal-tui;help'= {
             cand profile 'Manage connection profiles'
             cand filter 'Manage saved visibility queries'
+            cand auth 'Sign in to a protected self-hosted Temporal deployment'
             cand config-path 'Print the active config path'
             cand help 'Print this message or the help of the given subcommand(s)'
         }
@@ -241,6 +293,17 @@ set edit:completion:arg-completer[temporal-tui] = {|@words|
         &'temporal-tui;help;filter;save'= {
         }
         &'temporal-tui;help;filter;remove'= {
+        }
+        &'temporal-tui;help;auth'= {
+            cand login 'Sign in with a local username and a password read without echo'
+            cand whoami 'Show the current signed-in identity and session status'
+            cand logout 'Revoke the refresh grant and remove its local credential'
+        }
+        &'temporal-tui;help;auth;login'= {
+        }
+        &'temporal-tui;help;auth;whoami'= {
+        }
+        &'temporal-tui;help;auth;logout'= {
         }
         &'temporal-tui;help;config-path'= {
         }

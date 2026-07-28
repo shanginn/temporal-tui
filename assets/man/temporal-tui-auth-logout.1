@@ -1,0 +1,19 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH temporal-tui-auth-logout 1  "logout "
+.SH NAME
+temporal\-tui\-auth\-logout \- Revoke the refresh grant and remove its local credential
+.SH SYNOPSIS
+\fBtemporal\-tui auth logout\fR [\fB\-\-config\fR] [\fB\-\-profile\fR] [\fB\-h\fR|\fB\-\-help\fR]
+.SH DESCRIPTION
+Revoke the refresh grant and remove its local credential
+.SH OPTIONS
+.TP
+\fB\-\-config\fR \fI<CONFIG>\fR
+Alternate config file. Defaults to the platform user config directory
+.TP
+\fB\-\-profile\fR \fI<PROFILE>\fR
+Named connection profile
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help

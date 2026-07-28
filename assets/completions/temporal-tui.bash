@@ -16,6 +16,9 @@ _temporal-tui() {
             ",$1")
                 cmd="temporal__tui"
                 ;;
+            temporal__tui,auth)
+                cmd="temporal__tui__subcmd__auth"
+                ;;
             temporal__tui,config-path)
                 cmd="temporal__tui__subcmd__config__subcmd__path"
                 ;;
@@ -27,6 +30,30 @@ _temporal-tui() {
                 ;;
             temporal__tui,profile)
                 cmd="temporal__tui__subcmd__profile"
+                ;;
+            temporal__tui__subcmd__auth,help)
+                cmd="temporal__tui__subcmd__auth__subcmd__help"
+                ;;
+            temporal__tui__subcmd__auth,login)
+                cmd="temporal__tui__subcmd__auth__subcmd__login"
+                ;;
+            temporal__tui__subcmd__auth,logout)
+                cmd="temporal__tui__subcmd__auth__subcmd__logout"
+                ;;
+            temporal__tui__subcmd__auth,whoami)
+                cmd="temporal__tui__subcmd__auth__subcmd__whoami"
+                ;;
+            temporal__tui__subcmd__auth__subcmd__help,help)
+                cmd="temporal__tui__subcmd__auth__subcmd__help__subcmd__help"
+                ;;
+            temporal__tui__subcmd__auth__subcmd__help,login)
+                cmd="temporal__tui__subcmd__auth__subcmd__help__subcmd__login"
+                ;;
+            temporal__tui__subcmd__auth__subcmd__help,logout)
+                cmd="temporal__tui__subcmd__auth__subcmd__help__subcmd__logout"
+                ;;
+            temporal__tui__subcmd__auth__subcmd__help,whoami)
+                cmd="temporal__tui__subcmd__auth__subcmd__help__subcmd__whoami"
                 ;;
             temporal__tui__subcmd__filter,help)
                 cmd="temporal__tui__subcmd__filter__subcmd__help"
@@ -52,6 +79,9 @@ _temporal-tui() {
             temporal__tui__subcmd__filter__subcmd__help,save)
                 cmd="temporal__tui__subcmd__filter__subcmd__help__subcmd__save"
                 ;;
+            temporal__tui__subcmd__help,auth)
+                cmd="temporal__tui__subcmd__help__subcmd__auth"
+                ;;
             temporal__tui__subcmd__help,config-path)
                 cmd="temporal__tui__subcmd__help__subcmd__config__subcmd__path"
                 ;;
@@ -63,6 +93,15 @@ _temporal-tui() {
                 ;;
             temporal__tui__subcmd__help,profile)
                 cmd="temporal__tui__subcmd__help__subcmd__profile"
+                ;;
+            temporal__tui__subcmd__help__subcmd__auth,login)
+                cmd="temporal__tui__subcmd__help__subcmd__auth__subcmd__login"
+                ;;
+            temporal__tui__subcmd__help__subcmd__auth,logout)
+                cmd="temporal__tui__subcmd__help__subcmd__auth__subcmd__logout"
+                ;;
+            temporal__tui__subcmd__help__subcmd__auth,whoami)
+                cmd="temporal__tui__subcmd__help__subcmd__auth__subcmd__whoami"
                 ;;
             temporal__tui__subcmd__help__subcmd__filter,list)
                 cmd="temporal__tui__subcmd__help__subcmd__filter__subcmd__list"
@@ -149,7 +188,7 @@ _temporal-tui() {
 
     case "${cmd}" in
         temporal__tui)
-            opts="-n -q -h -V --config --profile --address --namespace --api-key --tls --tls-ca --tls-cert --tls-key --tls-server-name --header --codec-endpoint --codec-header --codec-auth --query --page-size --refresh-seconds --no-auto-refresh --no-color --read-only --web-ui-url --help --version profile filter config-path help"
+            opts="-n -q -h -V --config --profile --address --namespace --api-key --tls --tls-ca --tls-cert --tls-key --tls-server-name --header --codec-endpoint --codec-header --codec-auth --query --page-size --refresh-seconds --no-auto-refresh --no-color --read-only --web-ui-url --help --version profile filter auth config-path help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 1 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -228,6 +267,184 @@ _temporal-tui() {
                     return 0
                     ;;
                 --web-ui-url)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        temporal__subcmd__tui__subcmd__auth)
+            opts="-h --config --profile --help login whoami logout help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --config)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --profile)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        temporal__subcmd__tui__subcmd__auth__subcmd__help)
+            opts="login whoami logout help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        temporal__subcmd__tui__subcmd__auth__subcmd__help__subcmd__help)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        temporal__subcmd__tui__subcmd__auth__subcmd__help__subcmd__login)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        temporal__subcmd__tui__subcmd__auth__subcmd__help__subcmd__logout)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        temporal__subcmd__tui__subcmd__auth__subcmd__help__subcmd__whoami)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        temporal__subcmd__tui__subcmd__auth__subcmd__login)
+            opts="-n -h --url --username --address --namespace --password-stdin --allow-http --set-default --config --profile --help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --url)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --username)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --address)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --namespace)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -n)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --config)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --profile)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        temporal__subcmd__tui__subcmd__auth__subcmd__logout)
+            opts="-h --config --profile --help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --config)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --profile)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        temporal__subcmd__tui__subcmd__auth__subcmd__whoami)
+            opts="-h --config --profile --help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --config)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --profile)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -419,8 +636,64 @@ _temporal-tui() {
             return 0
             ;;
         temporal__subcmd__tui__subcmd__help)
-            opts="profile filter config-path help"
+            opts="profile filter auth config-path help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        temporal__subcmd__tui__subcmd__help__subcmd__auth)
+            opts="login whoami logout"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        temporal__subcmd__tui__subcmd__help__subcmd__auth__subcmd__login)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        temporal__subcmd__tui__subcmd__help__subcmd__auth__subcmd__logout)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        temporal__subcmd__tui__subcmd__help__subcmd__auth__subcmd__whoami)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi

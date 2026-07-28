@@ -27,11 +27,16 @@ pub struct SavedQuery {
 
 /// Non-secret profile metadata shown by the in-process cluster switcher.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "independent profile status flags are rendered as separate switcher columns"
+)]
 pub struct ProfileSummary {
     pub name: String,
     pub address: String,
     pub namespace: String,
     pub read_only: bool,
+    pub auth_enabled: bool,
     pub codec_enabled: bool,
     pub is_default: bool,
 }
@@ -4689,6 +4694,7 @@ mod tests {
             address: address.to_string(),
             namespace: namespace.to_string(),
             read_only: false,
+            auth_enabled: false,
             codec_enabled: false,
             is_default: name == "dev",
         }

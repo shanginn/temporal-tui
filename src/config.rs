@@ -8,11 +8,14 @@ use std::{
 use anyhow::{Context, Result, bail};
 use directories::BaseDirs;
 use serde::{Deserialize, Serialize};
-use url::Url;
+use url::{Host, Url};
 
-use crate::service::{ClientTlsConfig, PayloadCodecConfig, TemporalConnectionConfig};
+use crate::{
+    auth::TemporalAuthProfile,
+    service::{ClientTlsConfig, PayloadCodecConfig, TemporalConnectionConfig},
+};
 
-const CONFIG_SCHEMA_VERSION: u32 = 2;
+const CONFIG_SCHEMA_VERSION: u32 = 3;
 const KEYRING_SERVICE: &str = "io.temporal.temporal-tui";
 
 /// Persisted application settings. Secret values are represented only by references.
@@ -115,7 +118,7 @@ impl UiPreferences {
 struct LegacyUserConfigV1 {
     schema_version: u32,
     default_profile: Option<String>,
-    profiles: BTreeMap<String, ConnectionProfile>,
+    profiles: BTreeMap<String, LegacyConnectionProfile>,
     filters: BTreeMap<String, SavedFilter>,
 }
 
@@ -135,9 +138,99 @@ impl From<LegacyUserConfigV1> for UserConfig {
         Self {
             schema_version: CONFIG_SCHEMA_VERSION,
             default_profile: legacy.default_profile,
-            profiles: legacy.profiles,
+            profiles: legacy
+                .profiles
+                .into_iter()
+                .map(|(name, profile)| (name, profile.into()))
+                .collect(),
             filters: legacy.filters,
             ui: UiPreferences::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct LegacyUserConfigV2 {
+    schema_version: u32,
+    default_profile: Option<String>,
+    profiles: BTreeMap<String, LegacyConnectionProfile>,
+    filters: BTreeMap<String, SavedFilter>,
+    ui: UiPreferences,
+}
+
+impl Default for LegacyUserConfigV2 {
+    fn default() -> Self {
+        Self {
+            schema_version: 2,
+            default_profile: None,
+            profiles: BTreeMap::new(),
+            filters: BTreeMap::new(),
+            ui: UiPreferences::default(),
+        }
+    }
+}
+
+impl From<LegacyUserConfigV2> for UserConfig {
+    fn from(legacy: LegacyUserConfigV2) -> Self {
+        Self {
+            schema_version: CONFIG_SCHEMA_VERSION,
+            default_profile: legacy.default_profile,
+            profiles: legacy
+                .profiles
+                .into_iter()
+                .map(|(name, profile)| (name, profile.into()))
+                .collect(),
+            filters: legacy.filters,
+            ui: legacy.ui,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct LegacyConnectionProfile {
+    address: String,
+    namespace: String,
+    tls: ProfileTls,
+    api_key: Option<SecretSource>,
+    headers: BTreeMap<String, String>,
+    secret_headers: BTreeMap<String, SecretSource>,
+    payload_codec: Option<ProfilePayloadCodec>,
+    web_ui_url: Option<String>,
+    read_only: bool,
+}
+
+impl Default for LegacyConnectionProfile {
+    fn default() -> Self {
+        let current = ConnectionProfile::default();
+        Self {
+            address: current.address,
+            namespace: current.namespace,
+            tls: current.tls,
+            api_key: current.api_key,
+            headers: current.headers,
+            secret_headers: current.secret_headers,
+            payload_codec: current.payload_codec,
+            web_ui_url: current.web_ui_url,
+            read_only: current.read_only,
+        }
+    }
+}
+
+impl From<LegacyConnectionProfile> for ConnectionProfile {
+    fn from(legacy: LegacyConnectionProfile) -> Self {
+        Self {
+            address: legacy.address,
+            namespace: legacy.namespace,
+            tls: legacy.tls,
+            api_key: legacy.api_key,
+            auth: None,
+            headers: legacy.headers,
+            secret_headers: legacy.secret_headers,
+            payload_codec: legacy.payload_codec,
+            web_ui_url: legacy.web_ui_url,
+            read_only: legacy.read_only,
         }
     }
 }
@@ -150,6 +243,7 @@ pub struct ConnectionProfile {
     pub namespace: String,
     pub tls: ProfileTls,
     pub api_key: Option<SecretSource>,
+    pub auth: Option<TemporalAuthProfile>,
     pub headers: BTreeMap<String, String>,
     pub secret_headers: BTreeMap<String, SecretSource>,
     pub payload_codec: Option<ProfilePayloadCodec>,
@@ -164,6 +258,7 @@ impl Default for ConnectionProfile {
             namespace: "default".to_string(),
             tls: ProfileTls::default(),
             api_key: None,
+            auth: None,
             headers: BTreeMap::new(),
             secret_headers: BTreeMap::new(),
             payload_codec: None,
@@ -181,6 +276,29 @@ impl ConnectionProfile {
         }
         if self.tls.client_certificate.is_some() != self.tls.client_private_key.is_some() {
             bail!("TLS client certificate and private key must be configured together");
+        }
+        if let Some(auth) = &self.auth {
+            auth.validate().context("auth configuration is invalid")?;
+            if self.api_key.is_some() {
+                bail!("auth and api_key cannot be configured together");
+            }
+            if self.headers.contains_key("authorization")
+                || self.secret_headers.contains_key("authorization")
+            {
+                bail!("auth and an authorization header cannot be configured together");
+            }
+            let temporal_uses_tls = self.tls.enabled
+                || self.tls.server_ca.is_some()
+                || self.tls.client_certificate.is_some()
+                || self.address.starts_with("https://");
+            if auth.allow_insecure
+                && !temporal_address_is_loopback(&self.address)
+                && !temporal_uses_tls
+            {
+                bail!(
+                    "auth allow_insecure requires a loopback Temporal address or an explicitly TLS-enabled connection"
+                );
+            }
         }
         if let Some(url) = &self.web_ui_url {
             let parsed = Url::parse(url).context("web_ui_url is not a valid URL")?;
@@ -332,6 +450,7 @@ pub struct SavedFilter {
 /// A profile after secret references have been resolved.
 pub struct ResolvedProfile {
     pub connection: TemporalConnectionConfig,
+    pub auth: Option<TemporalAuthProfile>,
     pub namespace: String,
     pub web_ui_url: Option<String>,
     pub read_only: bool,
@@ -403,6 +522,7 @@ impl ConfigStore {
                 Ok(config)
             }
             1 => self.migrate_v1(&raw),
+            2 => self.migrate_v2(&raw),
             version if version > CONFIG_SCHEMA_VERSION => bail!(
                 "config schema {version} is newer than supported schema {CONFIG_SCHEMA_VERSION}; upgrade temporal-tui"
             ),
@@ -462,7 +582,26 @@ impl ConfigStore {
             .context("schema 1 config is invalid after migration")?;
         self.save_migration_backup(1, raw.as_bytes())?;
         self.save(&migrated)
-            .context("could not persist migrated schema 2 config")?;
+            .context("could not persist migrated schema 3 config")?;
+        Ok(migrated)
+    }
+
+    fn migrate_v2(&self, raw: &str) -> Result<UserConfig> {
+        let legacy: LegacyUserConfigV2 = toml::from_str(raw)
+            .with_context(|| format!("could not parse schema 2 config {}", self.path.display()))?;
+        if legacy.schema_version != 2 {
+            bail!(
+                "schema 2 migration received schema {}",
+                legacy.schema_version
+            );
+        }
+        let migrated = UserConfig::from(legacy);
+        migrated
+            .validate()
+            .context("schema 2 config is invalid after migration")?;
+        self.save_migration_backup(2, raw.as_bytes())?;
+        self.save(&migrated)
+            .context("could not persist migrated schema 3 config")?;
         Ok(migrated)
     }
 
@@ -573,8 +712,15 @@ impl ConfigStore {
             })
             .transpose()?;
 
+        let auth_allows_insecure_transport = profile.auth.as_ref().is_some_and(|auth| {
+            auth.allow_insecure
+                && temporal_address_is_loopback(&profile.address)
+                && profile.secret_headers.is_empty()
+        });
+        let credential_bearing =
+            api_key.is_some() || profile.auth.is_some() || !profile.secret_headers.is_empty();
         let tls_enabled = profile.tls.enabled
-            || api_key.is_some()
+            || (credential_bearing && !auth_allows_insecure_transport)
             || profile.tls.server_ca.is_some()
             || profile.tls.client_certificate.is_some()
             || profile.address.starts_with("https://");
@@ -591,6 +737,7 @@ impl ConfigStore {
                 }),
                 payload_codec,
             },
+            auth: profile.auth.clone(),
             namespace: profile.namespace.clone(),
             web_ui_url: profile.web_ui_url.clone(),
             read_only: profile.read_only,
@@ -702,6 +849,24 @@ fn validate_temporal_address(address: &str) -> Result<()> {
     Ok(())
 }
 
+fn temporal_address_is_loopback(address: &str) -> bool {
+    let address = address.trim();
+    let normalized = if address.contains("://") {
+        address.to_string()
+    } else {
+        format!("http://{address}")
+    };
+    let Ok(parsed) = Url::parse(&normalized) else {
+        return false;
+    };
+    match parsed.host() {
+        Some(Host::Domain(host)) => host.eq_ignore_ascii_case("localhost"),
+        Some(Host::Ipv4(address)) => address.is_loopback(),
+        Some(Host::Ipv6(address)) => address.is_loopback(),
+        None => false,
+    }
+}
+
 fn contains_invalid_header_bytes(value: &str) -> bool {
     value
         .bytes()
@@ -716,6 +881,8 @@ fn looks_sensitive_header_name(name: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use tempfile::TempDir;
 
     use super::*;
@@ -723,6 +890,20 @@ mod tests {
     fn store_in(directory: &TempDir) -> ConfigStore {
         ConfigStore {
             path: directory.path().join("config.toml"),
+        }
+    }
+
+    fn auth_profile(allow_insecure: bool) -> TemporalAuthProfile {
+        let origin = if allow_insecure {
+            "http://127.0.0.1:8233"
+        } else {
+            "https://temporal.example.com"
+        };
+        TemporalAuthProfile {
+            url: origin.to_string(),
+            username: "operator".to_string(),
+            token_endpoint: format!("{origin}/oauth/token"),
+            allow_insecure,
         }
     }
 
@@ -774,7 +955,7 @@ mod tests {
         let backup = store.path().with_extension("toml.v1.bak");
         assert_eq!(fs::read(&backup).unwrap(), legacy.as_bytes());
         let persisted = fs::read_to_string(store.path()).unwrap();
-        assert!(persisted.contains("schema_version = 2"));
+        assert!(persisted.contains("schema_version = 3"));
         assert!(persisted.contains("[ui]"));
 
         #[cfg(unix)]
@@ -798,6 +979,90 @@ mod tests {
         fs::write(store.path(), legacy).unwrap();
         assert_eq!(store.load().unwrap(), migrated);
         assert_eq!(fs::read(&backup).unwrap(), backup_before);
+    }
+
+    #[test]
+    fn migrates_schema_two_once_and_keeps_an_exact_private_backup() {
+        let directory = TempDir::new().unwrap();
+        let store = store_in(&directory);
+        let legacy = concat!(
+            "schema_version = 2\n",
+            "default_profile = \"dev\"\n",
+            "\n",
+            "[profiles.dev]\n",
+            "address = \"temporal.example:7233\"\n",
+            "namespace = \"production\"\n",
+            "read_only = true\n",
+            "\n",
+            "[ui]\n",
+            "page_size = 50\n",
+            "refresh_seconds = 10\n",
+            "auto_refresh = false\n",
+            "color = false\n",
+        );
+        fs::write(store.path(), legacy).unwrap();
+
+        let migrated = store.load().unwrap();
+        assert_eq!(migrated.schema_version, CONFIG_SCHEMA_VERSION);
+        assert_eq!(migrated.default_profile.as_deref(), Some("dev"));
+        assert_eq!(migrated.profiles["dev"].auth, None);
+        assert!(migrated.profiles["dev"].read_only);
+        assert_eq!(migrated.ui.page_size, 50);
+        assert_eq!(migrated.ui.refresh_seconds, 10);
+        assert!(!migrated.ui.auto_refresh);
+        assert!(!migrated.ui.color);
+
+        let backup = store.path().with_extension("toml.v2.bak");
+        assert_eq!(fs::read(&backup).unwrap(), legacy.as_bytes());
+        let persisted = fs::read_to_string(store.path()).unwrap();
+        assert!(persisted.contains("schema_version = 3"));
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            assert_eq!(
+                fs::metadata(store.path()).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+            assert_eq!(
+                fs::metadata(&backup).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+
+        let backup_before = fs::read(&backup).unwrap();
+        assert_eq!(store.load().unwrap(), migrated);
+        assert_eq!(fs::read(&backup).unwrap(), backup_before);
+
+        fs::write(store.path(), legacy).unwrap();
+        assert_eq!(store.load().unwrap(), migrated);
+        assert_eq!(fs::read(&backup).unwrap(), backup_before);
+    }
+
+    #[test]
+    fn schema_two_cannot_smuggle_auth_configuration_into_migration() {
+        let directory = TempDir::new().unwrap();
+        let store = store_in(&directory);
+        let legacy = concat!(
+            "schema_version = 2\n",
+            "\n",
+            "[profiles.dev]\n",
+            "address = \"127.0.0.1:7233\"\n",
+            "\n",
+            "[profiles.dev.auth]\n",
+            "url = \"http://127.0.0.1:8233\"\n",
+            "username = \"operator\"\n",
+            "token_endpoint = \"http://127.0.0.1:8233/oauth/token\"\n",
+            "allow_insecure = true\n",
+        );
+        fs::write(store.path(), legacy).unwrap();
+
+        assert!(
+            format!("{:#}", store.load().unwrap_err()).contains("could not parse schema 2 config")
+        );
+        assert!(!store.path().with_extension("toml.v2.bak").exists());
+        assert_eq!(fs::read_to_string(store.path()).unwrap(), legacy);
     }
 
     #[test]
@@ -840,7 +1105,7 @@ mod tests {
                 .contains("newer than supported")
         );
 
-        fs::write(store.path(), "schema_version = 2\n\n[ui]\npage_size = 0\n").unwrap();
+        fs::write(store.path(), "schema_version = 3\n\n[ui]\npage_size = 0\n").unwrap();
         assert!(format!("{:#}", store.load().unwrap_err()).contains("ui.page_size"));
     }
 
@@ -882,6 +1147,196 @@ mod tests {
             ..ConnectionProfile::default()
         };
         assert!(profile.validate().is_err());
+    }
+
+    #[test]
+    fn auth_rejects_competing_bearer_credential_sources() {
+        let profile = ConnectionProfile {
+            api_key: Some(SecretSource::Env {
+                variable: "TEMPORAL_API_KEY".to_string(),
+            }),
+            auth: Some(auth_profile(false)),
+            ..ConnectionProfile::default()
+        };
+        assert!(
+            profile
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("auth and api_key")
+        );
+
+        let profile = ConnectionProfile {
+            auth: Some(auth_profile(false)),
+            secret_headers: BTreeMap::from([(
+                "authorization".to_string(),
+                SecretSource::Env {
+                    variable: "TEMPORAL_AUTHORIZATION".to_string(),
+                },
+            )]),
+            ..ConnectionProfile::default()
+        };
+        assert!(
+            profile
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("authorization header")
+        );
+
+        let profile = ConnectionProfile {
+            auth: Some(auth_profile(false)),
+            headers: BTreeMap::from([(
+                "authorization".to_string(),
+                "Bearer plaintext".to_string(),
+            )]),
+            ..ConnectionProfile::default()
+        };
+        assert!(
+            profile
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("authorization header")
+        );
+    }
+
+    #[test]
+    fn auth_metadata_serialization_has_no_token_or_password_fields() {
+        let mut config = UserConfig::default();
+        config.profiles.insert(
+            "cloud".to_string(),
+            ConnectionProfile {
+                address: "temporal.example.com:443".to_string(),
+                auth: Some(auth_profile(false)),
+                ..ConnectionProfile::default()
+            },
+        );
+
+        let serialized = toml::to_string_pretty(&config).unwrap();
+        let document: toml::Value = toml::from_str(&serialized).unwrap();
+        let auth = document
+            .get("profiles")
+            .and_then(toml::Value::as_table)
+            .and_then(|profiles| profiles.get("cloud"))
+            .and_then(toml::Value::as_table)
+            .and_then(|profile| profile.get("auth"))
+            .and_then(toml::Value::as_table)
+            .unwrap();
+        let keys = auth.keys().map(String::as_str).collect::<BTreeSet<_>>();
+        assert_eq!(
+            keys,
+            BTreeSet::from(["allow_insecure", "token_endpoint", "url", "username"])
+        );
+        assert!(!serialized.contains("access_token"));
+        assert!(!serialized.contains("refresh_token"));
+        assert!(!serialized.contains("password"));
+    }
+
+    #[test]
+    fn auth_transport_is_tls_unless_explicitly_insecure_and_loopback() {
+        let store = ConfigStore {
+            path: PathBuf::from("unused"),
+        };
+        let mut config = UserConfig::default();
+        config.profiles.insert(
+            "remote".to_string(),
+            ConnectionProfile {
+                address: "temporal.example.com:443".to_string(),
+                auth: Some(auth_profile(false)),
+                ..ConnectionProfile::default()
+            },
+        );
+        config.profiles.insert(
+            "local".to_string(),
+            ConnectionProfile {
+                address: "127.0.0.1:7233".to_string(),
+                web_ui_url: Some("http://127.0.0.1:8233".to_string()),
+                auth: Some(auth_profile(true)),
+                ..ConnectionProfile::default()
+            },
+        );
+        config.profiles.insert(
+            "local-tls".to_string(),
+            ConnectionProfile {
+                address: "[::1]:7233".to_string(),
+                auth: Some(auth_profile(true)),
+                tls: ProfileTls {
+                    enabled: true,
+                    ..ProfileTls::default()
+                },
+                ..ConnectionProfile::default()
+            },
+        );
+
+        let remote = store.resolve_profile(&config, "remote").unwrap();
+        assert!(remote.connection.tls.is_some());
+        assert_eq!(remote.auth, Some(auth_profile(false)));
+
+        let local = store.resolve_profile(&config, "local").unwrap();
+        assert!(local.connection.tls.is_none());
+        assert_eq!(local.auth, Some(auth_profile(true)));
+
+        let local_tls = store.resolve_profile(&config, "local-tls").unwrap();
+        assert!(local_tls.connection.tls.is_some());
+    }
+
+    #[test]
+    fn auth_allow_insecure_rejects_non_loopback_plaintext_temporal_targets() {
+        for address in [
+            "temporal.example.com:7233",
+            "10.0.0.1:7233",
+            "http://192.168.1.2:7233",
+        ] {
+            let profile = ConnectionProfile {
+                address: address.to_string(),
+                auth: Some(auth_profile(true)),
+                ..ConnectionProfile::default()
+            };
+            assert!(
+                profile
+                    .validate()
+                    .unwrap_err()
+                    .to_string()
+                    .contains("loopback Temporal address"),
+                "{address} unexpectedly passed validation"
+            );
+        }
+
+        let secure_remote = ConnectionProfile {
+            address: "temporal.example.com:443".to_string(),
+            auth: Some(auth_profile(true)),
+            tls: ProfileTls {
+                enabled: true,
+                ..ProfileTls::default()
+            },
+            ..ConnectionProfile::default()
+        };
+        secure_remote.validate().unwrap();
+    }
+
+    #[test]
+    fn another_secret_header_keeps_tls_on_for_loopback_auth() {
+        let store = ConfigStore {
+            path: PathBuf::from("unused"),
+        };
+        let variable = "PATH".to_string();
+        let mut config = UserConfig::default();
+        config.profiles.insert(
+            "local".to_string(),
+            ConnectionProfile {
+                address: "localhost:7233".to_string(),
+                auth: Some(auth_profile(true)),
+                secret_headers: BTreeMap::from([(
+                    "x-private-context".to_string(),
+                    SecretSource::Env { variable },
+                )]),
+                ..ConnectionProfile::default()
+            },
+        );
+
+        let resolved = store.resolve_profile(&config, "local").unwrap();
+        assert!(resolved.connection.tls.is_some());
     }
 
     #[test]

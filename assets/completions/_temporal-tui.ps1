@@ -50,6 +50,7 @@ Register-ArgumentCompleter -Native -CommandName 'temporal-tui' -ScriptBlock {
             [CompletionResult]::new('--version', '--version', [CompletionResultType]::ParameterName, 'Print version')
             [CompletionResult]::new('profile', 'profile', [CompletionResultType]::ParameterValue, 'Manage connection profiles')
             [CompletionResult]::new('filter', 'filter', [CompletionResultType]::ParameterValue, 'Manage saved visibility queries')
+            [CompletionResult]::new('auth', 'auth', [CompletionResultType]::ParameterValue, 'Sign in to a protected self-hosted Temporal deployment')
             [CompletionResult]::new('config-path', 'config-path', [CompletionResultType]::ParameterValue, 'Print the active config path')
             [CompletionResult]::new('help', 'help', [CompletionResultType]::ParameterValue, 'Print this message or the help of the given subcommand(s)')
             break
@@ -226,6 +227,65 @@ Register-ArgumentCompleter -Native -CommandName 'temporal-tui' -ScriptBlock {
         'temporal-tui;filter;help;help' {
             break
         }
+        'temporal-tui;auth' {
+            [CompletionResult]::new('--config', '--config', [CompletionResultType]::ParameterName, 'Alternate config file. Defaults to the platform user config directory')
+            [CompletionResult]::new('--profile', '--profile', [CompletionResultType]::ParameterName, 'Named connection profile')
+            [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
+            [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
+            [CompletionResult]::new('login', 'login', [CompletionResultType]::ParameterValue, 'Sign in with a local username and a password read without echo')
+            [CompletionResult]::new('whoami', 'whoami', [CompletionResultType]::ParameterValue, 'Show the current signed-in identity and session status')
+            [CompletionResult]::new('logout', 'logout', [CompletionResultType]::ParameterValue, 'Revoke the refresh grant and remove its local credential')
+            [CompletionResult]::new('help', 'help', [CompletionResultType]::ParameterValue, 'Print this message or the help of the given subcommand(s)')
+            break
+        }
+        'temporal-tui;auth;login' {
+            [CompletionResult]::new('--url', '--url', [CompletionResultType]::ParameterName, 'Temporal auth base URL')
+            [CompletionResult]::new('--username', '--username', [CompletionResultType]::ParameterName, 'Local username. Prompted when omitted')
+            [CompletionResult]::new('--address', '--address', [CompletionResultType]::ParameterName, 'Temporal gRPC address override when the auth service does not advertise one')
+            [CompletionResult]::new('-n', '-n', [CompletionResultType]::ParameterName, 'Namespace stored in a newly created profile')
+            [CompletionResult]::new('--namespace', '--namespace', [CompletionResultType]::ParameterName, 'Namespace stored in a newly created profile')
+            [CompletionResult]::new('--config', '--config', [CompletionResultType]::ParameterName, 'Alternate config file. Defaults to the platform user config directory')
+            [CompletionResult]::new('--profile', '--profile', [CompletionResultType]::ParameterName, 'Named connection profile')
+            [CompletionResult]::new('--password-stdin', '--password-stdin', [CompletionResultType]::ParameterName, 'Read the password from stdin instead of a terminal prompt')
+            [CompletionResult]::new('--allow-http', '--allow-http', [CompletionResultType]::ParameterName, 'Permit loopback-only HTTP for local development and tests')
+            [CompletionResult]::new('--set-default', '--set-default', [CompletionResultType]::ParameterName, 'Make the selected profile the default')
+            [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
+            [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
+            break
+        }
+        'temporal-tui;auth;whoami' {
+            [CompletionResult]::new('--config', '--config', [CompletionResultType]::ParameterName, 'Alternate config file. Defaults to the platform user config directory')
+            [CompletionResult]::new('--profile', '--profile', [CompletionResultType]::ParameterName, 'Named connection profile')
+            [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
+            [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
+            break
+        }
+        'temporal-tui;auth;logout' {
+            [CompletionResult]::new('--config', '--config', [CompletionResultType]::ParameterName, 'Alternate config file. Defaults to the platform user config directory')
+            [CompletionResult]::new('--profile', '--profile', [CompletionResultType]::ParameterName, 'Named connection profile')
+            [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
+            [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
+            break
+        }
+        'temporal-tui;auth;help' {
+            [CompletionResult]::new('login', 'login', [CompletionResultType]::ParameterValue, 'Sign in with a local username and a password read without echo')
+            [CompletionResult]::new('whoami', 'whoami', [CompletionResultType]::ParameterValue, 'Show the current signed-in identity and session status')
+            [CompletionResult]::new('logout', 'logout', [CompletionResultType]::ParameterValue, 'Revoke the refresh grant and remove its local credential')
+            [CompletionResult]::new('help', 'help', [CompletionResultType]::ParameterValue, 'Print this message or the help of the given subcommand(s)')
+            break
+        }
+        'temporal-tui;auth;help;login' {
+            break
+        }
+        'temporal-tui;auth;help;whoami' {
+            break
+        }
+        'temporal-tui;auth;help;logout' {
+            break
+        }
+        'temporal-tui;auth;help;help' {
+            break
+        }
         'temporal-tui;config-path' {
             [CompletionResult]::new('--config', '--config', [CompletionResultType]::ParameterName, 'Alternate config file. Defaults to the platform user config directory')
             [CompletionResult]::new('--profile', '--profile', [CompletionResultType]::ParameterName, 'Named connection profile')
@@ -236,6 +296,7 @@ Register-ArgumentCompleter -Native -CommandName 'temporal-tui' -ScriptBlock {
         'temporal-tui;help' {
             [CompletionResult]::new('profile', 'profile', [CompletionResultType]::ParameterValue, 'Manage connection profiles')
             [CompletionResult]::new('filter', 'filter', [CompletionResultType]::ParameterValue, 'Manage saved visibility queries')
+            [CompletionResult]::new('auth', 'auth', [CompletionResultType]::ParameterValue, 'Sign in to a protected self-hosted Temporal deployment')
             [CompletionResult]::new('config-path', 'config-path', [CompletionResultType]::ParameterValue, 'Print the active config path')
             [CompletionResult]::new('help', 'help', [CompletionResultType]::ParameterValue, 'Print this message or the help of the given subcommand(s)')
             break
@@ -284,6 +345,21 @@ Register-ArgumentCompleter -Native -CommandName 'temporal-tui' -ScriptBlock {
             break
         }
         'temporal-tui;help;filter;remove' {
+            break
+        }
+        'temporal-tui;help;auth' {
+            [CompletionResult]::new('login', 'login', [CompletionResultType]::ParameterValue, 'Sign in with a local username and a password read without echo')
+            [CompletionResult]::new('whoami', 'whoami', [CompletionResultType]::ParameterValue, 'Show the current signed-in identity and session status')
+            [CompletionResult]::new('logout', 'logout', [CompletionResultType]::ParameterValue, 'Revoke the refresh grant and remove its local credential')
+            break
+        }
+        'temporal-tui;help;auth;login' {
+            break
+        }
+        'temporal-tui;help;auth;whoami' {
+            break
+        }
+        'temporal-tui;help;auth;logout' {
             break
         }
         'temporal-tui;help;config-path' {

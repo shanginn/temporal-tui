@@ -21,7 +21,7 @@ shell startup files.
 Install a specific version or a different prefix:
 
 ```sh
-sh temporal-tui-installer.sh --version 1.0.2
+sh temporal-tui-installer.sh --version 1.1.0
 sh temporal-tui-installer.sh --prefix /opt/temporal-tui
 ```
 
@@ -34,12 +34,12 @@ Download the target archive and `SHA256SUMS` from the matching GitHub Release:
 
 ```sh
 shasum -a 256 -c SHA256SUMS
-gh attestation verify temporal-tui-v1.0.2-aarch64-apple-darwin.tgz \
+gh attestation verify temporal-tui-v1.1.0-aarch64-apple-darwin.tgz \
   --repo shanginn/temporal-tui
 ```
 
 Linux can use `sha256sum -c`. Archives contain the binary, license, README,
-manpage, and Bash, Zsh, Fish, PowerShell, and Elvish completions.
+manpages, and Bash, Zsh, Fish, PowerShell, and Elvish completions.
 
 ## Package managers
 
@@ -68,10 +68,26 @@ Cargo from source:
 
 ```sh
 cargo install --locked --git https://github.com/shanginn/temporal-tui \
-  --tag v1.0.2
+  --tag v1.1.0
 ```
 
 The manifest includes `cargo-binstall` metadata for release archives.
+
+## Protected self-hosted login
+
+The prebuilt binary contains the complete login client. It does not need a
+`temporal-auth` wrapper/plugin or a Temporal CLI installation:
+
+```sh
+temporal-tui --profile rubase auth login \
+  --url https://temporal.example.com \
+  --username admin
+temporal-tui --profile rubase
+```
+
+The interactive password prompt is masked. Non-interactive installations can
+pipe a password to `auth login --password-stdin`; there is no password flag.
+Use `auth whoami` to inspect the local session and `auth logout` to revoke it.
 
 ## Manual Unix install
 
@@ -92,13 +108,15 @@ Ensure `~/.local/bin` is in `PATH`, then run `temporal-tui --version`.
 
 ## Upgrade and rollback
 
-Replace the binary through the same method. On first config read, v1 migrates
-schema 1 to schema 2. It first writes byte-identical `config.toml.v1.bak`, then
-atomically replaces the config; both files are `0600` on Unix.
+Replace the binary through the same method. On first config read, v1.1 migrates
+schema 1 or schema 2 to schema 3. It first writes a byte-identical
+`config.toml.v1.bak` or `config.toml.v2.bak`, then atomically replaces the
+config; both files are `0600` on Unix.
 
 Migration stops without replacement for missing/unknown/newer schema, invalid
 legacy data, a conflicting backup, or write failure. Keep the backup until the
-upgrade is exercised. A v0.5 binary can use that backup for rollback.
+upgrade is exercised. Restore the matching backup before rolling back to a
+binary that predates schema 3.
 
 ## Uninstall
 
@@ -112,9 +130,11 @@ cargo uninstall temporal-tui
 scoop uninstall temporal-tui
 ```
 
-Manual installs remove the binary, manpage, and completion files. Uninstall
-intentionally preserves config, migration backups, and exports. Use
-`temporal-tui config-path` before removing them manually.
+Manual installs remove the binary, manpages, and completion files. Uninstall
+intentionally preserves config, migration backups, exports, and saved
+credentials. Run `temporal-tui --profile NAME auth logout` before uninstalling
+if a protected self-hosted session should be revoked and removed. Use
+`temporal-tui config-path` before removing remaining files manually.
 
 Release CI smoke-tests clean install, schema upgrade, binary removal, and
 configuration preservation on every packaged OS.

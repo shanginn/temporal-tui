@@ -282,6 +282,90 @@ esac
     ;;
 esac
 ;;
+(auth)
+_arguments "${_arguments_options[@]}" : \
+'--config=[Alternate config file. Defaults to the platform user config directory]:CONFIG:_files' \
+'--profile=[Named connection profile]:PROFILE:_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+":: :_temporal-tui__subcmd__auth_commands" \
+"*::: :->auth" \
+&& ret=0
+
+    case $state in
+    (auth)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:temporal-tui-auth-command-$line[1]:"
+        case $line[1] in
+            (login)
+_arguments "${_arguments_options[@]}" : \
+'--url=[Temporal auth base URL]:URL:_default' \
+'--username=[Local username. Prompted when omitted]:USERNAME:_default' \
+'--address=[Temporal gRPC address override when the auth service does not advertise one]:ADDRESS:_default' \
+'-n+[Namespace stored in a newly created profile]:NAMESPACE:_default' \
+'--namespace=[Namespace stored in a newly created profile]:NAMESPACE:_default' \
+'--config=[Alternate config file. Defaults to the platform user config directory]:CONFIG:_files' \
+'--profile=[Named connection profile]:PROFILE:_default' \
+'--password-stdin[Read the password from stdin instead of a terminal prompt]' \
+'--allow-http[Permit loopback-only HTTP for local development and tests]' \
+'--set-default[Make the selected profile the default]' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(whoami)
+_arguments "${_arguments_options[@]}" : \
+'--config=[Alternate config file. Defaults to the platform user config directory]:CONFIG:_files' \
+'--profile=[Named connection profile]:PROFILE:_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(logout)
+_arguments "${_arguments_options[@]}" : \
+'--config=[Alternate config file. Defaults to the platform user config directory]:CONFIG:_files' \
+'--profile=[Named connection profile]:PROFILE:_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+":: :_temporal-tui__subcmd__auth__subcmd__help_commands" \
+"*::: :->help" \
+&& ret=0
+
+    case $state in
+    (help)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:temporal-tui-auth-help-command-$line[1]:"
+        case $line[1] in
+            (login)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(whoami)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(logout)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+        esac
+    ;;
+esac
+;;
 (config-path)
 _arguments "${_arguments_options[@]}" : \
 '--config=[Alternate config file. Defaults to the platform user config directory]:CONFIG:_files' \
@@ -374,6 +458,34 @@ _arguments "${_arguments_options[@]}" : \
     ;;
 esac
 ;;
+(auth)
+_arguments "${_arguments_options[@]}" : \
+":: :_temporal-tui__subcmd__help__subcmd__auth_commands" \
+"*::: :->auth" \
+&& ret=0
+
+    case $state in
+    (auth)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:temporal-tui-help-auth-command-$line[1]:"
+        case $line[1] in
+            (login)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(whoami)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(logout)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
 (config-path)
 _arguments "${_arguments_options[@]}" : \
 && ret=0
@@ -396,10 +508,66 @@ _temporal-tui_commands() {
     local commands; commands=(
 'profile:Manage connection profiles' \
 'filter:Manage saved visibility queries' \
+'auth:Sign in to a protected self-hosted Temporal deployment' \
 'config-path:Print the active config path' \
 'help:Print this message or the help of the given subcommand(s)' \
     )
     _describe -t commands 'temporal-tui commands' commands "$@"
+}
+(( $+functions[_temporal-tui__subcmd__auth_commands] )) ||
+_temporal-tui__subcmd__auth_commands() {
+    local commands; commands=(
+'login:Sign in with a local username and a password read without echo' \
+'whoami:Show the current signed-in identity and session status' \
+'logout:Revoke the refresh grant and remove its local credential' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'temporal-tui auth commands' commands "$@"
+}
+(( $+functions[_temporal-tui__subcmd__auth__subcmd__help_commands] )) ||
+_temporal-tui__subcmd__auth__subcmd__help_commands() {
+    local commands; commands=(
+'login:Sign in with a local username and a password read without echo' \
+'whoami:Show the current signed-in identity and session status' \
+'logout:Revoke the refresh grant and remove its local credential' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'temporal-tui auth help commands' commands "$@"
+}
+(( $+functions[_temporal-tui__subcmd__auth__subcmd__help__subcmd__help_commands] )) ||
+_temporal-tui__subcmd__auth__subcmd__help__subcmd__help_commands() {
+    local commands; commands=()
+    _describe -t commands 'temporal-tui auth help help commands' commands "$@"
+}
+(( $+functions[_temporal-tui__subcmd__auth__subcmd__help__subcmd__login_commands] )) ||
+_temporal-tui__subcmd__auth__subcmd__help__subcmd__login_commands() {
+    local commands; commands=()
+    _describe -t commands 'temporal-tui auth help login commands' commands "$@"
+}
+(( $+functions[_temporal-tui__subcmd__auth__subcmd__help__subcmd__logout_commands] )) ||
+_temporal-tui__subcmd__auth__subcmd__help__subcmd__logout_commands() {
+    local commands; commands=()
+    _describe -t commands 'temporal-tui auth help logout commands' commands "$@"
+}
+(( $+functions[_temporal-tui__subcmd__auth__subcmd__help__subcmd__whoami_commands] )) ||
+_temporal-tui__subcmd__auth__subcmd__help__subcmd__whoami_commands() {
+    local commands; commands=()
+    _describe -t commands 'temporal-tui auth help whoami commands' commands "$@"
+}
+(( $+functions[_temporal-tui__subcmd__auth__subcmd__login_commands] )) ||
+_temporal-tui__subcmd__auth__subcmd__login_commands() {
+    local commands; commands=()
+    _describe -t commands 'temporal-tui auth login commands' commands "$@"
+}
+(( $+functions[_temporal-tui__subcmd__auth__subcmd__logout_commands] )) ||
+_temporal-tui__subcmd__auth__subcmd__logout_commands() {
+    local commands; commands=()
+    _describe -t commands 'temporal-tui auth logout commands' commands "$@"
+}
+(( $+functions[_temporal-tui__subcmd__auth__subcmd__whoami_commands] )) ||
+_temporal-tui__subcmd__auth__subcmd__whoami_commands() {
+    local commands; commands=()
+    _describe -t commands 'temporal-tui auth whoami commands' commands "$@"
 }
 (( $+functions[_temporal-tui__subcmd__config-path_commands] )) ||
 _temporal-tui__subcmd__config-path_commands() {
@@ -466,10 +634,35 @@ _temporal-tui__subcmd__help_commands() {
     local commands; commands=(
 'profile:Manage connection profiles' \
 'filter:Manage saved visibility queries' \
+'auth:Sign in to a protected self-hosted Temporal deployment' \
 'config-path:Print the active config path' \
 'help:Print this message or the help of the given subcommand(s)' \
     )
     _describe -t commands 'temporal-tui help commands' commands "$@"
+}
+(( $+functions[_temporal-tui__subcmd__help__subcmd__auth_commands] )) ||
+_temporal-tui__subcmd__help__subcmd__auth_commands() {
+    local commands; commands=(
+'login:Sign in with a local username and a password read without echo' \
+'whoami:Show the current signed-in identity and session status' \
+'logout:Revoke the refresh grant and remove its local credential' \
+    )
+    _describe -t commands 'temporal-tui help auth commands' commands "$@"
+}
+(( $+functions[_temporal-tui__subcmd__help__subcmd__auth__subcmd__login_commands] )) ||
+_temporal-tui__subcmd__help__subcmd__auth__subcmd__login_commands() {
+    local commands; commands=()
+    _describe -t commands 'temporal-tui help auth login commands' commands "$@"
+}
+(( $+functions[_temporal-tui__subcmd__help__subcmd__auth__subcmd__logout_commands] )) ||
+_temporal-tui__subcmd__help__subcmd__auth__subcmd__logout_commands() {
+    local commands; commands=()
+    _describe -t commands 'temporal-tui help auth logout commands' commands "$@"
+}
+(( $+functions[_temporal-tui__subcmd__help__subcmd__auth__subcmd__whoami_commands] )) ||
+_temporal-tui__subcmd__help__subcmd__auth__subcmd__whoami_commands() {
+    local commands; commands=()
+    _describe -t commands 'temporal-tui help auth whoami commands' commands "$@"
 }
 (( $+functions[_temporal-tui__subcmd__help__subcmd__config-path_commands] )) ||
 _temporal-tui__subcmd__help__subcmd__config-path_commands() {

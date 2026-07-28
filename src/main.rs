@@ -4,6 +4,7 @@ use anyhow::Result;
 use clap::Parser;
 use temporal_tui::{
     app::App,
+    auth::AuthSession,
     cli::Cli,
     config::ConfigStore,
     runtime,
@@ -18,13 +19,17 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
     let store = ConfigStore::discover(cli.config.clone())?;
-    if cli.run_config_command(&store)? {
+    if cli.run_config_command(&store).await? {
         return Ok(());
     }
     let user_config = store.load()?;
     let launch = cli.launch_config(&store, &user_config)?;
+    let auth = launch
+        .auth
+        .map(|auth| AuthSession::load(&auth.profile_name, auth.profile))
+        .transpose()?;
     let service: Arc<dyn TemporalService> =
-        Arc::new(GrpcTemporalService::connect(launch.connection).await?);
+        Arc::new(GrpcTemporalService::connect_with_auth(launch.connection, auth).await?);
     let app = App::new(launch.app);
     let mut terminal = TerminalSession::new()?;
 

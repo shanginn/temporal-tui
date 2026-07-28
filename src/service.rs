@@ -1,6 +1,9 @@
 use std::{
     collections::{HashMap, VecDeque},
+    fmt,
+    net::IpAddr,
     path::PathBuf,
+    sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -90,19 +93,22 @@ use temporalio_common::{
     },
 };
 use thiserror::Error;
-use url::Url;
+use url::{Host, Url};
 
-use crate::model::{
-    BatchOperationDetails, BatchOperationKind, BatchOperationPage, BatchOperationRequest,
-    BatchOperationSummary, Capability, CapabilityAvailability, CapabilitySummary, ClusterInfo,
-    DeploymentVersion, DeploymentVersionSummary, FailureSummary, HistoryEventSummary, HistoryPage,
-    NamespaceSummary, PendingActivitySummary, PollerSummary, ScheduleActionResult,
-    ScheduleBackfillRequest, ScheduleCreateRequest, ScheduleDetails, SchedulePage, ScheduleSummary,
-    ScheduleUpdateRequest, SearchAttributeSummary, ServerCapabilities, StructuredField,
-    TaskQueueStats, TaskQueueSummary, TaskQueueType, WorkerDeploymentDetails, WorkerDeploymentPage,
-    WorkerDeploymentSummary, WorkerDetails, WorkerPage, WorkerSlots, WorkerSummary,
-    WorkflowCallResult, WorkflowCount, WorkflowCountGroup, WorkflowDetails, WorkflowKey,
-    WorkflowPage, WorkflowStatus, WorkflowSummary,
+use crate::{
+    auth::AuthSession,
+    model::{
+        BatchOperationDetails, BatchOperationKind, BatchOperationPage, BatchOperationRequest,
+        BatchOperationSummary, Capability, CapabilityAvailability, CapabilitySummary, ClusterInfo,
+        DeploymentVersion, DeploymentVersionSummary, FailureSummary, HistoryEventSummary,
+        HistoryPage, NamespaceSummary, PendingActivitySummary, PollerSummary, ScheduleActionResult,
+        ScheduleBackfillRequest, ScheduleCreateRequest, ScheduleDetails, SchedulePage,
+        ScheduleSummary, ScheduleUpdateRequest, SearchAttributeSummary, ServerCapabilities,
+        StructuredField, TaskQueueStats, TaskQueueSummary, TaskQueueType, WorkerDeploymentDetails,
+        WorkerDeploymentPage, WorkerDeploymentSummary, WorkerDetails, WorkerPage, WorkerSlots,
+        WorkerSummary, WorkflowCallResult, WorkflowCount, WorkflowCountGroup, WorkflowDetails,
+        WorkflowKey, WorkflowPage, WorkflowStatus, WorkflowSummary,
+    },
 };
 
 /// TLS settings loaded by the client at startup.
@@ -115,7 +121,7 @@ pub struct ClientTlsConfig {
 }
 
 /// Connection settings independent of the UI.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct TemporalConnectionConfig {
     pub address: String,
     pub api_key: Option<String>,
@@ -124,11 +130,38 @@ pub struct TemporalConnectionConfig {
     pub payload_codec: Option<PayloadCodecConfig>,
 }
 
+impl fmt::Debug for TemporalConnectionConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut header_names = self.headers.keys().collect::<Vec<_>>();
+        header_names.sort_unstable();
+        formatter
+            .debug_struct("TemporalConnectionConfig")
+            .field("address", &self.address)
+            .field("api_key", &self.api_key.as_ref().map(|_| "[redacted]"))
+            .field("header_names", &header_names)
+            .field("tls", &self.tls)
+            .field("payload_codec", &self.payload_codec)
+            .finish()
+    }
+}
+
 /// Remote Temporal Codec Server settings.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct PayloadCodecConfig {
     pub endpoint: String,
     pub headers: HashMap<String, String>,
+}
+
+impl fmt::Debug for PayloadCodecConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut header_names = self.headers.keys().collect::<Vec<_>>();
+        header_names.sort_unstable();
+        formatter
+            .debug_struct("PayloadCodecConfig")
+            .field("endpoint", &self.endpoint)
+            .field("header_names", &header_names)
+            .finish()
+    }
 }
 
 /// Errors returned by the Temporal service adapter.
@@ -152,6 +185,9 @@ pub enum ServiceError {
 
     #[error("could not connect to Temporal: {0}")]
     Connect(String),
+
+    #[error("Temporal login failed: {0}")]
+    Authentication(String),
 
     #[error("Temporal {operation} RPC failed: {source}")]
     Rpc {
@@ -862,6 +898,17 @@ pub trait TemporalService: Send + Sync {
 pub struct GrpcTemporalService {
     connection: Connection,
     payload_codec: Option<HttpPayloadCodec>,
+    _auth_refresh: Option<Arc<AuthRefreshTask>>,
+}
+
+struct AuthRefreshTask {
+    abort: tokio::task::AbortHandle,
+}
+
+impl Drop for AuthRefreshTask {
+    fn drop(&mut self) {
+        self.abort.abort();
+    }
 }
 
 impl GrpcTemporalService {
@@ -872,12 +919,51 @@ impl GrpcTemporalService {
     /// Returns an error for an invalid address, unreadable TLS material, invalid
     /// client configuration, or an unreachable Temporal frontend.
     pub async fn connect(config: TemporalConnectionConfig) -> Result<Self, ServiceError> {
+        Self::connect_with_auth(config, None).await
+    }
+
+    /// Connect with a refreshable local-auth session.
+    ///
+    /// The access token is acquired before the SDK's initial `GetSystemInfo`
+    /// call. A background task rotates it early and updates the shared
+    /// connection in place; dropping the last service clone cancels that task.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the session cannot produce an initial access token
+    /// or when the underlying Temporal connection fails.
+    pub async fn connect_with_auth(
+        mut config: TemporalConnectionConfig,
+        auth: Option<AuthSession>,
+    ) -> Result<Self, ServiceError> {
         let address = normalize_address(&config.address, config.tls.is_some());
         let target = Url::parse(&address).map_err(|source| ServiceError::InvalidAddress {
             address: address.clone(),
             source,
         })?;
         validate_connection_target(&target, &config)?;
+
+        if let Some(session) = &auth {
+            if config.api_key.is_some()
+                || config
+                    .headers
+                    .keys()
+                    .any(|name| name.eq_ignore_ascii_case("authorization"))
+            {
+                return Err(ServiceError::ConnectionConfig(
+                    "local login cannot be combined with an API key or authorization header"
+                        .to_string(),
+                ));
+            }
+            validate_authenticated_target(&target, session.profile().allow_insecure)?;
+            config.api_key = Some(
+                session
+                    .access_token()
+                    .await
+                    .map_err(|error| ServiceError::Authentication(error.to_string()))?,
+            );
+        }
+
         let payload_codec = config
             .payload_codec
             .map(HttpPayloadCodec::new)
@@ -895,9 +981,46 @@ impl GrpcTemporalService {
         let connection = Connection::connect(options)
             .await
             .map_err(|error| ServiceError::Connect(error.to_string()))?;
+        let auth_refresh = auth.map(|session| {
+            let refresh_connection = connection.clone();
+            let task = tokio::spawn(async move {
+                let mut retry_delay = Duration::from_secs(5);
+                loop {
+                    tokio::time::sleep(
+                        session
+                            .next_refresh_delay()
+                            .await
+                            .max(Duration::from_secs(1)),
+                    )
+                    .await;
+                    match session.force_refresh().await {
+                        Ok(token) => {
+                            refresh_connection.set_api_key(Some(token));
+                            retry_delay = Duration::from_secs(5);
+                        }
+                        Err(error) => {
+                            if !error.is_retryable() {
+                                tracing::warn!(
+                                    %error,
+                                    "Temporal login session requires a new sign-in; stopping automatic refresh"
+                                );
+                                break;
+                            }
+                            tracing::warn!(%error, "could not refresh Temporal login session");
+                            tokio::time::sleep(retry_delay).await;
+                            retry_delay = (retry_delay * 2).min(Duration::from_mins(1));
+                        }
+                    }
+                }
+            });
+            Arc::new(AuthRefreshTask {
+                abort: task.abort_handle(),
+            })
+        });
         Ok(Self {
             connection,
             payload_codec,
+            _auth_refresh: auth_refresh,
         })
     }
 
@@ -3815,6 +3938,32 @@ fn validate_connection_target(
     Ok(())
 }
 
+fn validate_authenticated_target(target: &Url, allow_insecure: bool) -> Result<(), ServiceError> {
+    if target.scheme() == "https" {
+        return Ok(());
+    }
+    if allow_insecure && target.host().is_some_and(|host| host_is_loopback(&host)) {
+        return Ok(());
+    }
+    Err(ServiceError::ConnectionConfig(
+        "local login requires TLS; insecure transport is restricted to explicit loopback development"
+            .to_string(),
+    ))
+}
+
+fn host_is_loopback(host: &Host<&str>) -> bool {
+    match host {
+        Host::Domain(domain) => {
+            domain.eq_ignore_ascii_case("localhost")
+                || domain
+                    .parse::<IpAddr>()
+                    .is_ok_and(|address| address.is_loopback())
+        }
+        Host::Ipv4(address) => address.is_loopback(),
+        Host::Ipv6(address) => address.is_loopback(),
+    }
+}
+
 fn contains_invalid_metadata_bytes(value: &str) -> bool {
     value
         .bytes()
@@ -3909,6 +4058,46 @@ mod tests {
             normalize_address("http://cloud.example:7233", true),
             "https://cloud.example:7233"
         );
+    }
+
+    #[test]
+    fn authenticated_targets_require_tls_except_explicit_loopback_development() {
+        let remote_plaintext = Url::parse("http://temporal.example:7233").unwrap();
+        assert!(validate_authenticated_target(&remote_plaintext, false).is_err());
+        assert!(validate_authenticated_target(&remote_plaintext, true).is_err());
+
+        let loopback_plaintext = Url::parse("http://127.0.0.1:7233").unwrap();
+        assert!(validate_authenticated_target(&loopback_plaintext, false).is_err());
+        validate_authenticated_target(&loopback_plaintext, true).unwrap();
+
+        let remote_tls = Url::parse("https://temporal.example:7233").unwrap();
+        validate_authenticated_target(&remote_tls, false).unwrap();
+    }
+
+    #[test]
+    fn connection_debug_output_redacts_credentials_and_header_values() {
+        let config = TemporalConnectionConfig {
+            address: "https://temporal.example:7233".to_string(),
+            api_key: Some("access-secret".to_string()),
+            headers: HashMap::from([(
+                "authorization".to_string(),
+                "Bearer header-secret".to_string(),
+            )]),
+            tls: None,
+            payload_codec: Some(PayloadCodecConfig {
+                endpoint: "https://codec.example".to_string(),
+                headers: HashMap::from([(
+                    "authorization".to_string(),
+                    "Bearer codec-secret".to_string(),
+                )]),
+            }),
+        };
+
+        let rendered = format!("{config:?}");
+        assert!(!rendered.contains("access-secret"));
+        assert!(!rendered.contains("header-secret"));
+        assert!(!rendered.contains("codec-secret"));
+        assert!(rendered.contains("authorization"));
     }
 
     #[test]

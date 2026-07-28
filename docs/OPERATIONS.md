@@ -11,6 +11,20 @@ Use TLS for non-loopback frontends. Store API keys with
 `profile set-api-key`; use environment references in headless sessions.
 Credentials in addresses/public headers are rejected.
 
+For a protected self-hosted deployment, establish and verify the local session
+before the read-only preflight:
+
+```sh
+temporal-tui --profile production auth login \
+  --url https://temporal.example.com \
+  --username operator
+temporal-tui --profile production auth whoami
+temporal-tui --profile production --read-only
+```
+
+The login client is built in and the launched TUI connects directly to Temporal
+gRPC. No wrapper, plugin, or Temporal CLI process is part of the runtime path.
+
 ## Observation
 
 - `1`: Workflows, details, history, payloads, chains, pending Activities.
@@ -43,12 +57,32 @@ header references, and scoped authorization. Codec failures affect payload
 presentation/encoding; use the explicit operation result to determine Temporal
 success or failure.
 
+## Local-session operation
+
+- Prefer the masked password prompt. For automation, pipe the password to
+  `auth login --password-stdin`; never place it in process arguments.
+- Keep the OS credential manager unlocked while starting or switching to the
+  profile. Refresh credentials are never copied into profile TOML.
+- Concurrent TUI and `auth whoami` processes serialize refresh for the same
+  profile/origin/user and reload the latest one-time credential before use.
+- Use `auth whoami` to check the current identity and session status.
+- Use `auth logout` before account handoff or workstation decommissioning. It
+  revokes the refresh credential before removing the local copy.
+- If a process or network connection dies during refresh, the server may
+  already have consumed the one-time credential. Sign in again if retrying
+  reports an invalid or expired session.
+- Disabling or resetting the server-side session stops future refresh. An
+  access token already held by a running TUI remains usable until its short
+  expiry, so also enforce server-side authorization when immediate cutoff is
+  required.
+
 ## Recovery
 
 - `ctrl-c` globally exits and restores raw mode, cursor, and alternate screen.
   After an external hard kill on Unix, use `stty sane`.
 - Failed profile switching retains the old service and state.
-- Failed migration retains the schema-1 source and reports the blocker.
+- Failed migration retains the schema-1 or schema-2 source and reports the
+  blocker.
 - Exports are private create-new JSON files. Review redaction before sharing.
 
 Every `master` merge runs locked quality, platform, and disposable 1.31 live

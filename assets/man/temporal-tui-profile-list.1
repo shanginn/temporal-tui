@@ -1,0 +1,19 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH temporal-tui-profile-list 1  "list "
+.SH NAME
+temporal\-tui\-profile\-list \- List configured profiles without resolving secrets
+.SH SYNOPSIS
+\fBtemporal\-tui profile list\fR [\fB\-\-config\fR] [\fB\-\-profile\fR] [\fB\-h\fR|\fB\-\-help\fR]
+.SH DESCRIPTION
+List configured profiles without resolving secrets
+.SH OPTIONS
+.TP
+\fB\-\-config\fR \fI<CONFIG>\fR
+Alternate config file. Defaults to the platform user config directory
+.TP
+\fB\-\-profile\fR \fI<PROFILE>\fR
+Named connection profile
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help

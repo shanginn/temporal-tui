@@ -49,6 +49,7 @@ complete -c temporal-tui -n "__fish_temporal_tui_needs_command" -s h -l help -d 
 complete -c temporal-tui -n "__fish_temporal_tui_needs_command" -s V -l version -d 'Print version'
 complete -c temporal-tui -n "__fish_temporal_tui_needs_command" -f -a "profile" -d 'Manage connection profiles'
 complete -c temporal-tui -n "__fish_temporal_tui_needs_command" -f -a "filter" -d 'Manage saved visibility queries'
+complete -c temporal-tui -n "__fish_temporal_tui_needs_command" -f -a "auth" -d 'Sign in to a protected self-hosted Temporal deployment'
 complete -c temporal-tui -n "__fish_temporal_tui_needs_command" -f -a "config-path" -d 'Print the active config path'
 complete -c temporal-tui -n "__fish_temporal_tui_needs_command" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
 complete -c temporal-tui -n "__fish_temporal_tui_using_subcommand profile; and not __fish_seen_subcommand_from list show create set-default set-api-key clear-api-key remove help" -l config -d 'Alternate config file. Defaults to the platform user config directory' -r -F
@@ -132,13 +133,41 @@ complete -c temporal-tui -n "__fish_temporal_tui_using_subcommand filter; and __
 complete -c temporal-tui -n "__fish_temporal_tui_using_subcommand filter; and __fish_seen_subcommand_from help" -f -a "save" -d 'Save or replace a visibility query'
 complete -c temporal-tui -n "__fish_temporal_tui_using_subcommand filter; and __fish_seen_subcommand_from help" -f -a "remove" -d 'Remove a saved visibility query'
 complete -c temporal-tui -n "__fish_temporal_tui_using_subcommand filter; and __fish_seen_subcommand_from help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
+complete -c temporal-tui -n "__fish_temporal_tui_using_subcommand auth; and not __fish_seen_subcommand_from login whoami logout help" -l config -d 'Alternate config file. Defaults to the platform user config directory' -r -F
+complete -c temporal-tui -n "__fish_temporal_tui_using_subcommand auth; and not __fish_seen_subcommand_from login whoami logout help" -l profile -d 'Named connection profile' -r
+complete -c temporal-tui -n "__fish_temporal_tui_using_subcommand auth; and not __fish_seen_subcommand_from login whoami logout help" -s h -l help -d 'Print help'
+complete -c temporal-tui -n "__fish_temporal_tui_using_subcommand auth; and not __fish_seen_subcommand_from login whoami logout help" -f -a "login" -d 'Sign in with a local username and a password read without echo'
+complete -c temporal-tui -n "__fish_temporal_tui_using_subcommand auth; and not __fish_seen_subcommand_from login whoami logout help" -f -a "whoami" -d 'Show the current signed-in identity and session status'
+complete -c temporal-tui -n "__fish_temporal_tui_using_subcommand auth; and not __fish_seen_subcommand_from login whoami logout help" -f -a "logout" -d 'Revoke the refresh grant and remove its local credential'
+complete -c temporal-tui -n "__fish_temporal_tui_using_subcommand auth; and not __fish_seen_subcommand_from login whoami logout help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
+complete -c temporal-tui -n "__fish_temporal_tui_using_subcommand auth; and __fish_seen_subcommand_from login" -l url -d 'Temporal auth base URL' -r
+complete -c temporal-tui -n "__fish_temporal_tui_using_subcommand auth; and __fish_seen_subcommand_from login" -l username -d 'Local username. Prompted when omitted' -r
+complete -c temporal-tui -n "__fish_temporal_tui_using_subcommand auth; and __fish_seen_subcommand_from login" -l address -d 'Temporal gRPC address override when the auth service does not advertise one' -r
+complete -c temporal-tui -n "__fish_temporal_tui_using_subcommand auth; and __fish_seen_subcommand_from login" -s n -l namespace -d 'Namespace stored in a newly created profile' -r
+complete -c temporal-tui -n "__fish_temporal_tui_using_subcommand auth; and __fish_seen_subcommand_from login" -l config -d 'Alternate config file. Defaults to the platform user config directory' -r -F
+complete -c temporal-tui -n "__fish_temporal_tui_using_subcommand auth; and __fish_seen_subcommand_from login" -l profile -d 'Named connection profile' -r
+complete -c temporal-tui -n "__fish_temporal_tui_using_subcommand auth; and __fish_seen_subcommand_from login" -l password-stdin -d 'Read the password from stdin instead of a terminal prompt'
+complete -c temporal-tui -n "__fish_temporal_tui_using_subcommand auth; and __fish_seen_subcommand_from login" -l allow-http -d 'Permit loopback-only HTTP for local development and tests'
+complete -c temporal-tui -n "__fish_temporal_tui_using_subcommand auth; and __fish_seen_subcommand_from login" -l set-default -d 'Make the selected profile the default'
+complete -c temporal-tui -n "__fish_temporal_tui_using_subcommand auth; and __fish_seen_subcommand_from login" -s h -l help -d 'Print help'
+complete -c temporal-tui -n "__fish_temporal_tui_using_subcommand auth; and __fish_seen_subcommand_from whoami" -l config -d 'Alternate config file. Defaults to the platform user config directory' -r -F
+complete -c temporal-tui -n "__fish_temporal_tui_using_subcommand auth; and __fish_seen_subcommand_from whoami" -l profile -d 'Named connection profile' -r
+complete -c temporal-tui -n "__fish_temporal_tui_using_subcommand auth; and __fish_seen_subcommand_from whoami" -s h -l help -d 'Print help'
+complete -c temporal-tui -n "__fish_temporal_tui_using_subcommand auth; and __fish_seen_subcommand_from logout" -l config -d 'Alternate config file. Defaults to the platform user config directory' -r -F
+complete -c temporal-tui -n "__fish_temporal_tui_using_subcommand auth; and __fish_seen_subcommand_from logout" -l profile -d 'Named connection profile' -r
+complete -c temporal-tui -n "__fish_temporal_tui_using_subcommand auth; and __fish_seen_subcommand_from logout" -s h -l help -d 'Print help'
+complete -c temporal-tui -n "__fish_temporal_tui_using_subcommand auth; and __fish_seen_subcommand_from help" -f -a "login" -d 'Sign in with a local username and a password read without echo'
+complete -c temporal-tui -n "__fish_temporal_tui_using_subcommand auth; and __fish_seen_subcommand_from help" -f -a "whoami" -d 'Show the current signed-in identity and session status'
+complete -c temporal-tui -n "__fish_temporal_tui_using_subcommand auth; and __fish_seen_subcommand_from help" -f -a "logout" -d 'Revoke the refresh grant and remove its local credential'
+complete -c temporal-tui -n "__fish_temporal_tui_using_subcommand auth; and __fish_seen_subcommand_from help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
 complete -c temporal-tui -n "__fish_temporal_tui_using_subcommand config-path" -l config -d 'Alternate config file. Defaults to the platform user config directory' -r -F
 complete -c temporal-tui -n "__fish_temporal_tui_using_subcommand config-path" -l profile -d 'Named connection profile' -r
 complete -c temporal-tui -n "__fish_temporal_tui_using_subcommand config-path" -s h -l help -d 'Print help'
-complete -c temporal-tui -n "__fish_temporal_tui_using_subcommand help; and not __fish_seen_subcommand_from profile filter config-path help" -f -a "profile" -d 'Manage connection profiles'
-complete -c temporal-tui -n "__fish_temporal_tui_using_subcommand help; and not __fish_seen_subcommand_from profile filter config-path help" -f -a "filter" -d 'Manage saved visibility queries'
-complete -c temporal-tui -n "__fish_temporal_tui_using_subcommand help; and not __fish_seen_subcommand_from profile filter config-path help" -f -a "config-path" -d 'Print the active config path'
-complete -c temporal-tui -n "__fish_temporal_tui_using_subcommand help; and not __fish_seen_subcommand_from profile filter config-path help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
+complete -c temporal-tui -n "__fish_temporal_tui_using_subcommand help; and not __fish_seen_subcommand_from profile filter auth config-path help" -f -a "profile" -d 'Manage connection profiles'
+complete -c temporal-tui -n "__fish_temporal_tui_using_subcommand help; and not __fish_seen_subcommand_from profile filter auth config-path help" -f -a "filter" -d 'Manage saved visibility queries'
+complete -c temporal-tui -n "__fish_temporal_tui_using_subcommand help; and not __fish_seen_subcommand_from profile filter auth config-path help" -f -a "auth" -d 'Sign in to a protected self-hosted Temporal deployment'
+complete -c temporal-tui -n "__fish_temporal_tui_using_subcommand help; and not __fish_seen_subcommand_from profile filter auth config-path help" -f -a "config-path" -d 'Print the active config path'
+complete -c temporal-tui -n "__fish_temporal_tui_using_subcommand help; and not __fish_seen_subcommand_from profile filter auth config-path help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
 complete -c temporal-tui -n "__fish_temporal_tui_using_subcommand help; and __fish_seen_subcommand_from profile" -f -a "list" -d 'List configured profiles without resolving secrets'
 complete -c temporal-tui -n "__fish_temporal_tui_using_subcommand help; and __fish_seen_subcommand_from profile" -f -a "show" -d 'Print one redacted profile as TOML'
 complete -c temporal-tui -n "__fish_temporal_tui_using_subcommand help; and __fish_seen_subcommand_from profile" -f -a "create" -d 'Create a connection profile'
@@ -149,3 +178,6 @@ complete -c temporal-tui -n "__fish_temporal_tui_using_subcommand help; and __fi
 complete -c temporal-tui -n "__fish_temporal_tui_using_subcommand help; and __fish_seen_subcommand_from filter" -f -a "list" -d 'List saved visibility queries'
 complete -c temporal-tui -n "__fish_temporal_tui_using_subcommand help; and __fish_seen_subcommand_from filter" -f -a "save" -d 'Save or replace a visibility query'
 complete -c temporal-tui -n "__fish_temporal_tui_using_subcommand help; and __fish_seen_subcommand_from filter" -f -a "remove" -d 'Remove a saved visibility query'
+complete -c temporal-tui -n "__fish_temporal_tui_using_subcommand help; and __fish_seen_subcommand_from auth" -f -a "login" -d 'Sign in with a local username and a password read without echo'
+complete -c temporal-tui -n "__fish_temporal_tui_using_subcommand help; and __fish_seen_subcommand_from auth" -f -a "whoami" -d 'Show the current signed-in identity and session status'
+complete -c temporal-tui -n "__fish_temporal_tui_using_subcommand help; and __fish_seen_subcommand_from auth" -f -a "logout" -d 'Revoke the refresh grant and remove its local credential'

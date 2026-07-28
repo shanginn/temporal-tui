@@ -73,6 +73,10 @@ installer above; `temporal-tui` itself has no Xcode runtime dependency.
   inside the TUI with `P`; the target connection is verified before the current
   service is replaced, and stale responses from the previous cluster are
   discarded.
+- Sign in to protected self-hosted deployments with a masked local password and
+  keep the resulting session refreshed while the TUI is running. The TUI talks
+  directly to Temporal gRPC; no wrapper, plugin, or Temporal CLI process is
+  required.
 - Store API keys in macOS Keychain, Windows Credential Manager, Linux Secret
   Service, or resolve them from an environment variable. Secret material is
   never written to the profile file.
@@ -147,6 +151,22 @@ Against a local Temporal frontend:
   --namespace default
 ```
 
+Against a protected self-hosted deployment:
+
+```sh
+temporal-tui --profile rubase auth login \
+  --url https://temporal.example.com \
+  --username admin
+temporal-tui --profile rubase
+temporal-tui --profile rubase auth whoami
+temporal-tui --profile rubase auth logout
+```
+
+The password prompt is masked. Automation can pipe the password to
+`auth login --password-stdin`; there is deliberately no password command-line
+flag. Login stores only non-secret connection/session metadata in the profile,
+then the normal TUI process connects directly to Temporal.
+
 Against Temporal Cloud with an API key:
 
 ```sh
@@ -193,9 +213,30 @@ operating-system credential manager. For headless environments, use
 `profile create ... --api-key-env TEMPORAL_API_KEY`.
 
 Press `P` from the dashboard to switch among configured profiles without
-restarting. Profile rows contain only non-secret address, namespace, mode, and
-Codec Server status. Secret references are resolved only after selection. A
-failed reconnect leaves the current connection and dashboard state unchanged.
+restarting. Profile rows contain only non-secret address, namespace, control,
+login, and Codec Server status. Secret references are resolved only after
+selection. A failed reconnect leaves the current connection and dashboard
+state unchanged.
+
+### Protected self-hosted login
+
+Local login requires HTTPS and a TLS Temporal endpoint. Redirects and
+cross-origin token endpoints are rejected. A hidden `--allow-http` development
+escape hatch accepts HTTP only for loopback auth endpoints; plaintext Temporal
+transport remains loopback-only.
+
+Access is granted with a short-lived bearer token kept only in process memory.
+Its rotating refresh credential is stored only in the operating-system
+credential manager. Credentials are bound to the profile, auth origin, token
+endpoint, and username; refreshes from concurrent TUI/`whoami` processes are
+serialized and reload the latest rotation before use. A rotated value is
+persisted before its new access token is exposed to Temporal.
+`auth logout` revokes that credential before deleting the local copy.
+Disabling or resetting a server-side session prevents future refresh; an access
+token already issued to a running process can remain usable until its short
+expiry. Because the server consumes a one-time refresh before returning the
+replacement, a crash or lost response during that exchange can still require a
+fresh login.
 
 Save reusable Visibility queries without hand-editing TOML:
 
@@ -221,7 +262,8 @@ temporal-tui profile create encrypted-cloud \
 Codec authorization is resolved only at runtime. It is not written to the
 profile or diagnostic exports.
 
-Schema-2 config accepts persisted UI defaults:
+Schema-3 config accepts persisted UI defaults and non-secret local-login
+metadata:
 
 ```toml
 [ui]
@@ -232,8 +274,8 @@ color = true
 ```
 
 CLI flags override numeric defaults and can disable auto-refresh or color.
-`NO_COLOR` is honored. Schema-1 files migrate atomically after a byte-identical
-`config.toml.v1.bak` is written.
+`NO_COLOR` is honored. Schema-1 and schema-2 files migrate atomically after a
+byte-identical `config.toml.v1.bak` or `config.toml.v2.bak` is written.
 
 ## Keyboard controls
 
@@ -293,6 +335,10 @@ scripts/install-temporal-cli.sh
 cargo test --locked --test live_temporal -- --ignored --nocapture
 ```
 
+The authentication acceptance test is also isolated: it uses disposable
+loopback auth and bearer-gated gRPC services, rotates a test refresh credential,
+and never contacts a production deployment or a user-owned Temporal server.
+
 The installer downloads the pinned CLI release into `.tools/bin`, verifies the
 published SHA-256 checksum, and does not modify the system installation.
 
@@ -309,9 +355,11 @@ produce typed commands, while the Tokio runtime executes those commands through
 a small `TemporalService` boundary. Request IDs suppress stale list, detail,
 mutation, and cross-cluster responses. Profile switching resolves secret
 references lazily and swaps the active service only after the new Temporal
-frontend responds successfully. Ratatui `TestBackend` tests cover the dashboard,
-confirmation modals, profile switcher, and small-terminal fallback without
-requiring a real terminal.
+frontend responds successfully. Protected self-hosted sessions update the
+in-memory authorization metadata as refresh credentials rotate; neither access
+nor refresh tokens enter profile TOML. Ratatui `TestBackend` tests cover the
+dashboard, confirmation modals, profile switcher, and small-terminal fallback
+without requiring a real terminal.
 
 The Worker list/detail surface uses Temporal's experimental heartbeat API and
 is shown as unavailable rather than guessed when a server or SDK does not

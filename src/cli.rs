@@ -1,14 +1,17 @@
 use std::{
     collections::{BTreeMap, HashMap},
+    io::{Read, Write},
     path::PathBuf,
     time::Duration,
 };
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use clap::{Parser, Subcommand};
+use zeroize::Zeroizing;
 
 use crate::{
     app::{AppConfig, ProfileSummary, SavedQuery},
+    auth::{AuthError, AuthSession, TemporalAuthProfile},
     config::{
         ConfigStore, ConnectionProfile, ProfilePayloadCodec, ProfileTls, SavedFilter, SecretSource,
         UserConfig,
@@ -129,8 +132,45 @@ pub enum CliCommand {
         #[command(subcommand)]
         command: FilterCommand,
     },
+    /// Sign in to a protected self-hosted Temporal deployment.
+    Auth {
+        #[command(subcommand)]
+        command: AuthCommand,
+    },
     /// Print the active config path.
     ConfigPath,
+}
+
+#[derive(Clone, Subcommand)]
+pub enum AuthCommand {
+    /// Sign in with a local username and a password read without echo.
+    Login {
+        /// Temporal auth base URL.
+        #[arg(long, env = "TEMPORAL_AUTH_URL")]
+        url: Option<String>,
+        /// Local username. Prompted when omitted.
+        #[arg(long)]
+        username: Option<String>,
+        /// Temporal gRPC address override when the auth service does not advertise one.
+        #[arg(long)]
+        address: Option<String>,
+        /// Namespace stored in a newly created profile.
+        #[arg(long, short = 'n')]
+        namespace: Option<String>,
+        /// Read the password from stdin instead of a terminal prompt.
+        #[arg(long)]
+        password_stdin: bool,
+        /// Permit loopback-only HTTP for local development and tests.
+        #[arg(long, hide = true)]
+        allow_http: bool,
+        /// Make the selected profile the default.
+        #[arg(long)]
+        set_default: bool,
+    },
+    /// Show the current signed-in identity and session status.
+    Whoami,
+    /// Revoke the refresh grant and remove its local credential.
+    Logout,
 }
 
 #[derive(Clone, Subcommand)]
@@ -225,7 +265,14 @@ pub enum FilterCommand {
 /// Fully merged launch settings.
 pub struct LaunchConfig {
     pub connection: TemporalConnectionConfig,
+    pub auth: Option<LaunchAuth>,
     pub app: AppConfig,
+}
+
+/// Non-secret metadata required to open a refreshable authenticated session.
+pub struct LaunchAuth {
+    pub profile_name: String,
+    pub profile: TemporalAuthProfile,
 }
 
 impl Cli {
@@ -237,7 +284,7 @@ impl Cli {
     ///
     /// Returns an error for invalid input, failed persistence, secret-store
     /// failures, or an explicitly unconfirmed destructive operation.
-    pub fn run_config_command(&self, store: &ConfigStore) -> Result<bool> {
+    pub async fn run_config_command(&self, store: &ConfigStore) -> Result<bool> {
         let Some(command) = &self.command else {
             return Ok(false);
         };
@@ -249,6 +296,9 @@ impl Cli {
             }
             CliCommand::Filter { command } => {
                 run_filter_command(command, store, &mut config)?;
+            }
+            CliCommand::Auth { command } => {
+                run_auth_command(command, self.profile.as_deref(), store, &mut config).await?;
             }
         }
         Ok(true)
@@ -267,41 +317,49 @@ impl Cli {
             .clone()
             .or_else(|| config.default_profile.clone());
 
-        let (mut connection, profile_namespace, profile_web_url, profile_read_only) =
-            if let Some(name) = profile_name.as_deref() {
-                let mut resolution_config = config.clone();
-                if self.api_key.is_some()
-                    && let Some(profile) = resolution_config.profiles.get_mut(name)
-                {
-                    profile.api_key = None;
-                }
-                let resolved = store.resolve_profile(&resolution_config, name)?;
-                (
-                    resolved.connection,
-                    resolved.namespace,
-                    resolved.web_ui_url,
-                    resolved.read_only,
-                )
-            } else {
-                (
-                    TemporalConnectionConfig {
-                        address: "127.0.0.1:7233".to_string(),
-                        api_key: None,
-                        headers: HashMap::new(),
-                        tls: None,
-                        payload_codec: None,
-                    },
-                    "default".to_string(),
-                    Some("http://127.0.0.1:8233".to_string()),
-                    false,
-                )
-            };
+        let (
+            mut connection,
+            profile_namespace,
+            profile_web_url,
+            profile_read_only,
+            mut profile_auth,
+        ) = if let Some(name) = profile_name.as_deref() {
+            let mut resolution_config = config.clone();
+            if self.api_key.is_some()
+                && let Some(profile) = resolution_config.profiles.get_mut(name)
+            {
+                profile.api_key = None;
+            }
+            let resolved = store.resolve_profile(&resolution_config, name)?;
+            (
+                resolved.connection,
+                resolved.namespace,
+                resolved.web_ui_url,
+                resolved.read_only,
+                resolved.auth,
+            )
+        } else {
+            (
+                TemporalConnectionConfig {
+                    address: "127.0.0.1:7233".to_string(),
+                    api_key: None,
+                    headers: HashMap::new(),
+                    tls: None,
+                    payload_codec: None,
+                },
+                "default".to_string(),
+                Some("http://127.0.0.1:8233".to_string()),
+                false,
+                None,
+            )
+        };
 
         if let Some(address) = &self.address {
             connection.address.clone_from(address);
         }
         if let Some(api_key) = &self.api_key {
             connection.api_key = Some(api_key.clone());
+            profile_auth = None;
         }
         for (key, value) in &self.headers {
             if connection
@@ -338,6 +396,7 @@ impl Cli {
             }
         }
 
+        let inherited_tls = connection.tls.is_some();
         let mut tls = connection.tls.take().unwrap_or(ClientTlsConfig {
             server_ca: None,
             client_certificate: None,
@@ -359,8 +418,13 @@ impl Cli {
         if tls.client_certificate.is_some() != tls.client_private_key.is_some() {
             bail!("--tls-cert and --tls-key must be supplied together");
         }
-        let tls_enabled = self.tls
+        let auth_requires_tls = profile_auth.as_ref().is_some_and(|auth| {
+            !auth.allow_insecure || !temporal_address_is_loopback(&connection.address)
+        });
+        let tls_enabled = inherited_tls
+            || self.tls
             || connection.api_key.is_some()
+            || auth_requires_tls
             || tls.server_ca.is_some()
             || tls.client_certificate.is_some()
             || connection.address.starts_with("https://")
@@ -395,12 +459,24 @@ impl Cli {
                 address: profile.address.clone(),
                 namespace: profile.namespace.clone(),
                 read_only: profile.read_only,
+                auth_enabled: profile.auth.is_some(),
                 codec_enabled: profile.payload_codec.is_some(),
                 is_default: config.default_profile.as_deref() == Some(name),
             })
             .collect();
+        let auth = profile_auth
+            .map(|profile| {
+                Ok::<_, anyhow::Error>(LaunchAuth {
+                    profile_name: profile_name
+                        .clone()
+                        .context("authenticated launch requires a selected profile")?,
+                    profile,
+                })
+            })
+            .transpose()?;
 
         Ok(LaunchConfig {
+            auth,
             app: AppConfig {
                 address: connection.address.clone(),
                 profile_name,
@@ -446,9 +522,16 @@ fn run_profile_command(
                 } else {
                     "control"
                 };
+                let auth = if profile.auth.is_some() {
+                    "login"
+                } else if profile.api_key.is_some() {
+                    "api-key"
+                } else {
+                    "direct"
+                };
                 println!(
-                    "{name}{default}\t{}\t{}\t{mode}",
-                    profile.address, profile.namespace
+                    "{name}{default}\t{}\t{}\t{mode}\t{auth}",
+                    profile.address, profile.namespace,
                 );
             }
         }
@@ -480,6 +563,13 @@ fn run_profile_command(
         } => {
             if config.profiles.contains_key(name) && !replace {
                 bail!("profile `{name}` already exists; pass --replace to overwrite it");
+            }
+            if config
+                .profiles
+                .get(name)
+                .is_some_and(|profile| profile.auth.is_some())
+            {
+                bail!("profile `{name}` is signed in; run `auth logout` before replacing it");
             }
             let mut unique_headers = BTreeMap::new();
             for (key, value) in headers {
@@ -532,6 +622,7 @@ fn run_profile_command(
                     api_key: api_key_env.as_ref().map(|variable| SecretSource::Env {
                         variable: variable.clone(),
                     }),
+                    auth: None,
                     headers: unique_headers,
                     secret_headers: BTreeMap::new(),
                     payload_codec,
@@ -558,6 +649,9 @@ fn run_profile_command(
                 .profiles
                 .get_mut(name)
                 .with_context(|| format!("profile `{name}` does not exist"))?;
+            if profile.auth.is_some() {
+                bail!("profile `{name}` uses local login; run `auth logout` first");
+            }
             let secret = if let Some(variable) = from_env {
                 std::env::var(variable)
                     .with_context(|| format!("environment variable `{variable}` is not set"))?
@@ -597,6 +691,10 @@ fn run_profile_command(
                 .profiles
                 .remove(name)
                 .with_context(|| format!("profile `{name}` does not exist"))?;
+            if profile.auth.is_some() {
+                config.profiles.insert(name.clone(), profile);
+                bail!("profile `{name}` is signed in; run `auth logout` before removing it");
+            }
             if config.default_profile.as_deref() == Some(name) {
                 config.default_profile = None;
             }
@@ -608,6 +706,231 @@ fn run_profile_command(
         }
     }
     Ok(())
+}
+
+async fn run_auth_command(
+    command: &AuthCommand,
+    selected_profile: Option<&str>,
+    store: &ConfigStore,
+    config: &mut UserConfig,
+) -> Result<()> {
+    let profile_name = selected_profile
+        .map(str::to_owned)
+        .or_else(|| config.default_profile.clone())
+        .unwrap_or_else(|| "default".to_string());
+
+    match command {
+        AuthCommand::Login {
+            url,
+            username,
+            address,
+            namespace,
+            password_stdin,
+            allow_http,
+            set_default,
+        } => {
+            if let Some(existing) = config.profiles.get(&profile_name) {
+                if existing.auth.is_some() {
+                    bail!(
+                        "profile `{profile_name}` is already signed in; run `auth logout` before signing in again"
+                    );
+                }
+                if existing.api_key.is_some() {
+                    bail!("profile `{profile_name}` uses an API key; clear it before signing in");
+                }
+                if existing.headers.contains_key("authorization")
+                    || existing.secret_headers.contains_key("authorization")
+                {
+                    bail!(
+                        "profile `{profile_name}` already defines an authorization header; remove it before signing in"
+                    );
+                }
+            }
+
+            if *password_stdin && (url.is_none() || username.is_none()) {
+                bail!("--password-stdin requires --url and --username");
+            }
+            let auth_url = match url {
+                Some(url) => url.trim().to_string(),
+                None => prompt_line("Temporal auth URL: ")?,
+            };
+            let username = match username {
+                Some(username) => username.trim().to_string(),
+                None => prompt_line("Username: ")?,
+            };
+            if auth_url.is_empty() {
+                bail!("Temporal auth URL must not be empty");
+            }
+            if username.is_empty() {
+                bail!("username must not be empty");
+            }
+
+            let password = Zeroizing::new(if *password_stdin {
+                read_password_from_stdin()?
+            } else {
+                rpassword::prompt_password("Password: ").context("could not read password")?
+            });
+            let login = AuthSession::login(
+                &profile_name,
+                &auth_url,
+                &username,
+                password.as_str(),
+                address.as_deref(),
+                *allow_http,
+            )
+            .await?;
+
+            let mut updated = config.clone();
+            let is_new = !updated.profiles.contains_key(&profile_name);
+            let profile = updated.profiles.entry(profile_name.clone()).or_default();
+            profile.address.clone_from(&login.temporal_address);
+            profile.namespace = namespace
+                .clone()
+                .unwrap_or_else(|| profile.namespace.clone());
+            profile.tls.enabled = login.temporal_tls;
+            profile.api_key = None;
+            profile.auth = Some(login.profile.clone());
+            if is_new {
+                profile.web_ui_url = Some(login.profile.url.clone());
+            }
+            if *set_default || updated.default_profile.is_none() {
+                updated.default_profile = Some(profile_name.clone());
+            }
+
+            if let Err(save_error) = store.save(&updated) {
+                let cleanup = login.session.logout().await;
+                return match cleanup {
+                    Ok(()) => Err(save_error.context(
+                        "could not save the signed-in profile; the new session was revoked",
+                    )),
+                    Err(cleanup_error) => Err(anyhow!(
+                        "could not save the signed-in profile ({save_error}); cleanup also failed ({cleanup_error})"
+                    )),
+                };
+            }
+            *config = updated;
+            println!("Signed in as {username}.");
+            println!("Profile: {profile_name}");
+            println!(
+                "Temporal endpoint: {} ({})",
+                login.temporal_address,
+                if login.temporal_tls {
+                    "TLS"
+                } else {
+                    "local development"
+                }
+            );
+            println!("Run: temporal-tui --profile {profile_name}");
+        }
+        AuthCommand::Whoami => {
+            let profile = config
+                .profiles
+                .get(&profile_name)
+                .with_context(|| format!("profile `{profile_name}` does not exist"))?;
+            let auth = profile
+                .auth
+                .clone()
+                .with_context(|| format!("profile `{profile_name}` is not signed in"))?;
+            let session = AuthSession::load(&profile_name, auth)?;
+            let identity = session.userinfo().await?;
+            println!("Profile: {profile_name}");
+            println!("User: {}", identity.preferred_username);
+            println!("Temporal endpoint: {}", profile.address);
+            println!("Session: active");
+        }
+        AuthCommand::Logout => {
+            let auth = config
+                .profiles
+                .get(&profile_name)
+                .with_context(|| format!("profile `{profile_name}` does not exist"))?
+                .auth
+                .clone()
+                .with_context(|| format!("profile `{profile_name}` is not signed in"))?;
+            let session = match AuthSession::load(&profile_name, auth) {
+                Ok(session) => session,
+                Err(AuthError::NotLoggedIn(_)) => {
+                    let Some(profile) = config.profiles.get_mut(&profile_name) else {
+                        bail!("profile `{profile_name}` disappeared while signing out");
+                    };
+                    profile.auth = None;
+                    store.save(config).context(
+                        "the local credential was already absent, but stale profile metadata could not be removed",
+                    )?;
+                    println!("Profile `{profile_name}` had no local login credential.");
+                    println!(
+                        "Removed stale local login metadata; no server grant could be revoked."
+                    );
+                    return Ok(());
+                }
+                Err(error) => return Err(error.into()),
+            };
+            if let Err(error) = session.logout().await {
+                if !matches!(error, AuthError::NotLoggedIn(_)) {
+                    return Err(error.into());
+                }
+                let Some(profile) = config.profiles.get_mut(&profile_name) else {
+                    bail!("profile `{profile_name}` disappeared while signing out");
+                };
+                profile.auth = None;
+                store.save(config).context(
+                    "the login was removed by another process, but stale profile metadata could not be removed",
+                )?;
+                println!("Profile `{profile_name}` was already signed out.");
+                println!("Removed stale local login metadata.");
+                return Ok(());
+            }
+
+            let Some(profile) = config.profiles.get_mut(&profile_name) else {
+                bail!("profile `{profile_name}` disappeared while signing out");
+            };
+            profile.auth = None;
+            store.save(config).context(
+                "session was revoked and its credential removed, but the profile could not be updated",
+            )?;
+            println!("Signed out profile `{profile_name}`.");
+            println!("The server session was revoked and local credentials were removed.");
+        }
+    }
+    Ok(())
+}
+
+fn prompt_line(prompt: &str) -> Result<String> {
+    let mut stderr = std::io::stderr().lock();
+    stderr
+        .write_all(prompt.as_bytes())
+        .context("could not write login prompt")?;
+    stderr.flush().context("could not flush login prompt")?;
+    drop(stderr);
+
+    let mut value = String::new();
+    std::io::stdin()
+        .read_line(&mut value)
+        .context("could not read login input")?;
+    Ok(value.trim().to_string())
+}
+
+fn read_password_from_stdin() -> Result<String> {
+    const MAX_PASSWORD_BYTES: u64 = 1 << 20;
+
+    let mut bytes = zeroize::Zeroizing::new(Vec::new());
+    std::io::stdin()
+        .lock()
+        .take(MAX_PASSWORD_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .context("could not read password from stdin")?;
+    if bytes.len() as u64 > MAX_PASSWORD_BYTES {
+        bail!("password input is larger than 1 MiB");
+    }
+    while matches!(bytes.last(), Some(b'\n' | b'\r')) {
+        bytes.pop();
+    }
+    let password = std::str::from_utf8(&bytes)
+        .context("password input is not valid UTF-8")?
+        .to_string();
+    if password.is_empty() {
+        bail!("password must not be empty");
+    }
+    Ok(password)
 }
 
 fn run_filter_command(
@@ -687,6 +1010,25 @@ fn parse_header(value: &str) -> Result<(String, String), String> {
     Ok((key, value))
 }
 
+fn temporal_address_is_loopback(address: &str) -> bool {
+    use url::Host;
+
+    let normalized = if address.contains("://") {
+        address.to_string()
+    } else {
+        format!("http://{address}")
+    };
+    let Ok(parsed) = url::Url::parse(&normalized) else {
+        return false;
+    };
+    match parsed.host() {
+        Some(Host::Domain(host)) => host.eq_ignore_ascii_case("localhost"),
+        Some(Host::Ipv4(address)) => address.is_loopback(),
+        Some(Host::Ipv6(address)) => address.is_loopback(),
+        None => false,
+    }
+}
+
 const fn color_enabled(preference: bool, cli_disabled: bool, no_color_env: bool) -> bool {
     preference && !cli_disabled && !no_color_env
 }
@@ -718,6 +1060,7 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+    use crate::auth::TemporalAuthProfile;
 
     fn empty_store() -> (TempDir, ConfigStore, UserConfig) {
         let directory = TempDir::new().unwrap();
@@ -744,6 +1087,93 @@ mod tests {
                 .tls
                 .is_some()
         );
+    }
+
+    #[test]
+    fn auth_login_has_no_password_argument() {
+        assert!(
+            Cli::try_parse_from([
+                "temporal-tui",
+                "--profile",
+                "rubase",
+                "auth",
+                "login",
+                "--url",
+                "https://temporal.example.com",
+                "--username",
+                "admin",
+                "--password",
+                "must-not-enter-process-arguments",
+            ])
+            .is_err()
+        );
+        Cli::try_parse_from([
+            "temporal-tui",
+            "--profile",
+            "rubase",
+            "auth",
+            "login",
+            "--url",
+            "https://temporal.example.com",
+            "--username",
+            "admin",
+            "--password-stdin",
+        ])
+        .unwrap();
+    }
+
+    #[test]
+    fn authenticated_profile_launch_is_refreshable_and_tls_protected() {
+        let (_directory, store, mut config) = empty_store();
+        config.default_profile = Some("rubase".to_string());
+        config.profiles.insert(
+            "rubase".to_string(),
+            ConnectionProfile {
+                address: "temporal-grpc.example.com:443".to_string(),
+                auth: Some(TemporalAuthProfile {
+                    url: "https://temporal.example.com".to_string(),
+                    username: "admin".to_string(),
+                    token_endpoint: "https://temporal.example.com/oauth/token".to_string(),
+                    allow_insecure: false,
+                }),
+                ..ConnectionProfile::default()
+            },
+        );
+
+        let launch = Cli::try_parse_from(["temporal-tui"])
+            .unwrap()
+            .launch_config(&store, &config)
+            .unwrap();
+        assert!(launch.auth.is_some());
+        assert!(launch.connection.api_key.is_none());
+        assert!(launch.connection.tls.is_some());
+        assert!(launch.app.profiles[0].auth_enabled);
+    }
+
+    #[test]
+    fn address_override_cannot_turn_loopback_login_into_plaintext_remote_auth() {
+        let (_directory, store, mut config) = empty_store();
+        config.default_profile = Some("dev".to_string());
+        config.profiles.insert(
+            "dev".to_string(),
+            ConnectionProfile {
+                address: "127.0.0.1:7233".to_string(),
+                auth: Some(TemporalAuthProfile {
+                    url: "http://127.0.0.1:8080".to_string(),
+                    username: "admin".to_string(),
+                    token_endpoint: "http://127.0.0.1:8080/oauth/token".to_string(),
+                    allow_insecure: true,
+                }),
+                ..ConnectionProfile::default()
+            },
+        );
+
+        let launch = Cli::try_parse_from(["temporal-tui", "--address", "temporal.example.com:443"])
+            .unwrap()
+            .launch_config(&store, &config)
+            .unwrap();
+        assert!(launch.auth.is_some());
+        assert!(launch.connection.tls.is_some());
     }
 
     #[test]

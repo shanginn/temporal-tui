@@ -62,12 +62,21 @@ test "$("${prefix}/bin/temporal-tui" --version)" = "temporal-tui ${version}"
 "${prefix}/bin/temporal-tui" --help >/dev/null
 test -x "${prefix}/bin/temporal-tui"
 test -f "${prefix}/share/man/man1/temporal-tui.1"
+test -f "${prefix}/share/man/man1/temporal-tui-auth.1"
+test -f "${prefix}/share/man/man1/temporal-tui-auth-login.1"
 test -f "${prefix}/share/bash-completion/completions/temporal-tui"
 test -f "${prefix}/share/zsh/site-functions/_temporal-tui"
 test -f "${prefix}/share/fish/vendor_completions.d/temporal-tui.fish"
 test -f "${prefix}/share/temporal-tui/completions/_temporal-tui.ps1"
 test -f "${prefix}/share/temporal-tui/completions/temporal-tui.elv"
-test "$(find "${prefix}" -type f | wc -l | tr -d ' ')" = "7"
+packaged_man_count="$(
+  tar -tzf "${archive}" |
+    awk '$0 ~ "/man/[^/]+[.]1$" { count += 1 } END { print count + 0 }'
+)"
+test "${packaged_man_count}" -gt 1
+expected_installed_files="$((packaged_man_count + 6))"
+test "$(find "${prefix}" -type f | wc -l | tr -d ' ')" = \
+  "${expected_installed_files}"
 
 # A changed archive must fail closed before extraction or installation.
 bad_checksums="${temporary_dir}/BAD_SHA256SUMS"

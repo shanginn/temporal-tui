@@ -1609,7 +1609,7 @@ fn render_profiles(frame: &mut Frame<'_>, area: Rect, app: &App, selected: usize
     let visible = app.profiles.len().clamp(3, 20);
     let popup = centered(
         area,
-        104,
+        120,
         u16::try_from(visible).unwrap_or(20).saturating_add(5),
     );
     frame.render_widget(Clear, popup);
@@ -1632,6 +1632,11 @@ fn render_profiles(frame: &mut Frame<'_>, area: Rect, app: &App, selected: usize
             } else {
                 "CONTROL"
             },
+            if profile.auth_enabled {
+                "LOGIN"
+            } else {
+                "DIRECT"
+            },
             if profile.codec_enabled {
                 "CODEC"
             } else {
@@ -1653,6 +1658,7 @@ fn render_profiles(frame: &mut Frame<'_>, area: Rect, app: &App, selected: usize
             Constraint::Fill(2),
             Constraint::Length(10),
             Constraint::Length(7),
+            Constraint::Length(7),
         ],
     )
     .header(
@@ -1662,6 +1668,7 @@ fn render_profiles(frame: &mut Frame<'_>, area: Rect, app: &App, selected: usize
             "ADDRESS",
             "NAMESPACE",
             "MODE",
+            "AUTH",
             "PAYLOAD",
         ])
         .style(theme.table_header()),
@@ -3900,6 +3907,7 @@ mod tests {
                 address: "127.0.0.1:7233".to_string(),
                 namespace: "default".to_string(),
                 read_only: false,
+                auth_enabled: false,
                 codec_enabled: false,
                 is_default: true,
             },
@@ -3908,6 +3916,7 @@ mod tests {
                 address: "production.tmprl.cloud:7233".to_string(),
                 namespace: "payments.a1b2c".to_string(),
                 read_only: true,
+                auth_enabled: true,
                 codec_enabled: true,
                 is_default: false,
             },
@@ -3917,6 +3926,7 @@ mod tests {
         assert!(picker.contains("Switch Temporal profile"));
         assert!(picker.contains("production.tmprl.cloud:7233"));
         assert!(picker.contains("READ ONLY"));
+        assert!(picker.contains("LOGIN"));
         assert!(picker.contains("secrets resolve only after selection"));
 
         app.overlay = None;

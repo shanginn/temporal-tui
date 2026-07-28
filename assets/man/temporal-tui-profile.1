@@ -1,0 +1,41 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH temporal-tui-profile 1  "profile "
+.SH NAME
+temporal\-tui\-profile \- Manage connection profiles
+.SH SYNOPSIS
+\fBtemporal\-tui profile\fR [\fB\-\-config\fR] [\fB\-\-profile\fR] [\fB\-h\fR|\fB\-\-help\fR] <\fIsubcommands\fR>
+.SH DESCRIPTION
+Manage connection profiles
+.SH OPTIONS
+.TP
+\fB\-\-config\fR \fI<CONFIG>\fR
+Alternate config file. Defaults to the platform user config directory
+.TP
+\fB\-\-profile\fR \fI<PROFILE>\fR
+Named connection profile
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help
+.SH SUBCOMMANDS
+.TP
+temporal\-tui\-profile\-list(1)
+List configured profiles without resolving secrets
+.TP
+temporal\-tui\-profile\-show(1)
+Print one redacted profile as TOML
+.TP
+temporal\-tui\-profile\-create(1)
+Create a connection profile
+.TP
+temporal\-tui\-profile\-set\-default(1)
+Select the default profile
+.TP
+temporal\-tui\-profile\-set\-api\-key(1)
+Read an API key without echo and store it in the OS credential manager
+.TP
+temporal\-tui\-profile\-clear\-api\-key(1)
+Remove an API key reference and delete its OS credential
+.TP
+temporal\-tui\-profile\-remove(1)
+Remove a profile

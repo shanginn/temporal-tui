@@ -23,7 +23,7 @@ class TemporalTui < Formula
 
   def install
     bin.install "temporal-tui"
-    man1.install "man/temporal-tui.1"
+    man1.install Dir["man/*.1"]
     bash_completion.install "completions/temporal-tui.bash" => "temporal-tui"
     zsh_completion.install "completions/_temporal-tui"
     fish_completion.install "completions/temporal-tui.fish"

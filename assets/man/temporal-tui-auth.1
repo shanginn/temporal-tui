@@ -1,0 +1,29 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH temporal-tui-auth 1  "auth "
+.SH NAME
+temporal\-tui\-auth \- Sign in to a protected self\-hosted Temporal deployment
+.SH SYNOPSIS
+\fBtemporal\-tui auth\fR [\fB\-\-config\fR] [\fB\-\-profile\fR] [\fB\-h\fR|\fB\-\-help\fR] <\fIsubcommands\fR>
+.SH DESCRIPTION
+Sign in to a protected self\-hosted Temporal deployment
+.SH OPTIONS
+.TP
+\fB\-\-config\fR \fI<CONFIG>\fR
+Alternate config file. Defaults to the platform user config directory
+.TP
+\fB\-\-profile\fR \fI<PROFILE>\fR
+Named connection profile
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help
+.SH SUBCOMMANDS
+.TP
+temporal\-tui\-auth\-login(1)
+Sign in with a local username and a password read without echo
+.TP
+temporal\-tui\-auth\-whoami(1)
+Show the current signed\-in identity and session status
+.TP
+temporal\-tui\-auth\-logout(1)
+Revoke the refresh grant and remove its local credential

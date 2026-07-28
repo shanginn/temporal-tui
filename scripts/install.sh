@@ -217,9 +217,12 @@ mkdir -p \
   "${install_prefix}/share/fish/vendor_completions.d" \
   "${install_prefix}/share/temporal-tui/completions"
 install -m 0755 "${package_path}/temporal-tui" "${install_prefix}/bin/temporal-tui"
-install -m 0644 \
-  "${package_path}/man/temporal-tui.1" \
-  "${install_prefix}/share/man/man1/temporal-tui.1"
+for manpage in "${package_path}"/man/*.1; do
+  [ -f "${manpage}" ] || fail "archive manpage set is invalid"
+  install -m 0644 \
+    "${manpage}" \
+    "${install_prefix}/share/man/man1/$(basename "${manpage}")"
+done
 install -m 0644 \
   "${package_path}/completions/temporal-tui.bash" \
   "${install_prefix}/share/bash-completion/completions/temporal-tui"

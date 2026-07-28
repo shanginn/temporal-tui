@@ -41,7 +41,7 @@ mkdir -p \
 install -m 0755 "${binary_path}" "${package_root}/temporal-tui"
 install -m 0644 "${project_root}/README.md" "${package_root}/README.md"
 install -m 0644 "${project_root}/LICENSE" "${package_root}/LICENSE"
-install -m 0644 "${project_root}/assets/man/temporal-tui.1" "${package_root}/man/"
+install -m 0644 "${project_root}"/assets/man/*.1 "${package_root}/man/"
 install -m 0644 "${project_root}"/assets/completions/* "${package_root}/completions/"
 
 mkdir -p "${output_dir}"

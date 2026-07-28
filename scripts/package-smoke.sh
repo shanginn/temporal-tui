@@ -7,6 +7,7 @@ trap 'rm -rf "${temporary_dir}"' EXIT
 extract_dir="${temporary_dir}/extract"
 prefix="${temporary_dir}/prefix"
 config="${temporary_dir}/config.toml"
+config_v2="${temporary_dir}/config-v2.toml"
 
 mkdir -p "${extract_dir}" "${prefix}/bin"
 tar -xzf "${archive}" -C "${extract_dir}"
@@ -18,6 +19,8 @@ fi
 
 test -x "${package_root}/temporal-tui"
 test -f "${package_root}/man/temporal-tui.1"
+test -f "${package_root}/man/temporal-tui-auth.1"
+test -f "${package_root}/man/temporal-tui-auth-login.1"
 test -f "${package_root}/completions/temporal-tui.bash"
 test -f "${package_root}/completions/_temporal-tui"
 test -f "${package_root}/completions/temporal-tui.fish"
@@ -34,11 +37,21 @@ printf 'schema_version = 1\n' >"${config}"
 TEMPORAL_TUI_CONFIG="${config}" \
   PATH="${prefix}/bin:${PATH}" \
   temporal-tui filter list
-grep -q '^schema_version = 2$' "${config}"
+grep -q '^schema_version = 3$' "${config}"
 cmp "${config}.v1.bak" <(printf 'schema_version = 1\n')
+
+# Exercise the immediately previous public schema independently.
+printf 'schema_version = 2\n' >"${config_v2}"
+TEMPORAL_TUI_CONFIG="${config_v2}" \
+  PATH="${prefix}/bin:${PATH}" \
+  temporal-tui filter list
+grep -q '^schema_version = 3$' "${config_v2}"
+cmp "${config_v2}.v2.bak" <(printf 'schema_version = 2\n')
 
 rm -f "${prefix}/bin/temporal-tui"
 test ! -e "${prefix}/bin/temporal-tui"
 # Uninstalling the binary intentionally leaves user configuration recoverable.
 test -f "${config}"
 test -f "${config}.v1.bak"
+test -f "${config_v2}"
+test -f "${config_v2}.v2.bak"

@@ -32,7 +32,7 @@ try {
     Copy-Item $ResolvedBinary (Join-Path $PackageRoot "temporal-tui.exe")
     Copy-Item (Join-Path $ProjectRoot "README.md") $PackageRoot
     Copy-Item (Join-Path $ProjectRoot "LICENSE") $PackageRoot
-    Copy-Item (Join-Path $ProjectRoot "assets/man/temporal-tui.1") (Join-Path $PackageRoot "man")
+    Copy-Item (Join-Path $ProjectRoot "assets/man/*.1") (Join-Path $PackageRoot "man")
     Copy-Item (Join-Path $ProjectRoot "assets/completions/*") (Join-Path $PackageRoot "completions")
 
     New-Item -ItemType Directory -Force $ResolvedOutput | Out-Null

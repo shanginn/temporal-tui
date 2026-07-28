@@ -19,6 +19,7 @@ use tokio::{
 
 use crate::{
     app::{App, Command, Message, OperationKind, ProfileConnectionInfo, UtilityKind},
+    auth::AuthSession,
     config::ConfigStore,
     model::{ClusterInfo, WorkflowDetails},
     service::{GrpcTemporalService, TemporalService},
@@ -190,7 +191,12 @@ async fn connect_profile(
     let namespace = resolved.namespace;
     let web_ui_url = resolved.web_ui_url;
     let read_only = resolved.read_only;
-    let service = GrpcTemporalService::connect(resolved.connection)
+    let auth = resolved
+        .auth
+        .map(|profile| AuthSession::load(&profile_name, profile))
+        .transpose()
+        .map_err(|error| format!("could not load login for profile/{profile_name}: {error}"))?;
+    let service = GrpcTemporalService::connect_with_auth(resolved.connection, auth)
         .await
         .map_err(|error| format!("could not connect profile/{profile_name}: {error}"))?;
     service

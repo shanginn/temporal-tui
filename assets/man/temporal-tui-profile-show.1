@@ -1,0 +1,21 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH temporal-tui-profile-show 1  "show "
+.SH NAME
+temporal\-tui\-profile\-show \- Print one redacted profile as TOML
+.SH SYNOPSIS
+\fBtemporal\-tui profile show\fR [\fB\-\-config\fR] [\fB\-\-profile\fR] [\fB\-h\fR|\fB\-\-help\fR] <\fINAME\fR>
+.SH DESCRIPTION
+Print one redacted profile as TOML
+.SH OPTIONS
+.TP
+\fB\-\-config\fR \fI<CONFIG>\fR
+Alternate config file. Defaults to the platform user config directory
+.TP
+\fB\-\-profile\fR \fI<PROFILE>\fR
+Named connection profile
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help
+.TP
+<\fINAME\fR>

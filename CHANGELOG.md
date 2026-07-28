@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.1.0 — 2026-07-29
+
+- Add native `auth login`, `auth whoami`, and `auth logout` for protected
+  self-hosted Temporal deployments. The TUI connects directly to Temporal gRPC
+  without a wrapper, plugin, or Temporal CLI runtime.
+- Mask interactive passwords, support stdin automation without a password
+  argument, keep short-lived access tokens in memory, and store only rotating
+  refresh credentials in the operating-system credential manager.
+- Require HTTPS, reject redirects and cross-origin token endpoints, restrict
+  the hidden insecure mode to loopback, and revoke refresh access before local
+  logout deletion.
+- Bind stored refresh credentials to profile/origin/token endpoint/username and
+  coordinate one-time rotation across concurrent processes.
+- Migrate schema-1 and schema-2 configs atomically to schema 3 with
+  byte-identical private backups.
+- Cover exchange, refresh rotation, authenticated gRPC, and revocation with an
+  isolated acceptance test; no positive production login is part of the test.
+
 ## 1.0.2 — 2026-07-28
 
 - Add a checksum-verifying standalone installer for macOS ARM64/Intel and
