@@ -15,7 +15,7 @@ manpage, and Bash, Zsh, Fish, PowerShell, and Elvish completions.
 
 ## Package managers
 
-Homebrew on macOS/Linux:
+Homebrew on macOS (ARM64 or Intel) and Linux x86_64:
 
 ```sh
 brew install shanginn/temporal-tui/temporal-tui

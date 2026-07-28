@@ -15,6 +15,7 @@ class TemporalTui < Formula
   end
 
   on_linux do
+    depends_on arch: :x86_64
     url "@REPOSITORY@/releases/download/v@VERSION@/@LINUX_ARCHIVE@"
     sha256 "@LINUX_SHA@"
   end
