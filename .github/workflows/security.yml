@@ -35,6 +35,22 @@ jobs:
           command: check
           arguments: --all-features --locked
       - name: Audit RustSec advisories
-        uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998 # v2.0.0
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          version="0.22.2"
+          package="cargo-audit-x86_64-unknown-linux-gnu-v${version}"
+          archive="${RUNNER_TEMP}/${package}.tgz"
+          install_dir="${RUNNER_TEMP}/cargo-audit"
+          curl --fail --location --silent --show-error \
+            "https://github.com/rustsec/rustsec/releases/download/cargo-audit/v${version}/${package}.tgz" \
+            --output "${archive}"
+          printf '%s  %s\n' \
+            "ab28a1bdb54db4d5d8ad5981cf1f959410370b3d28250dbd35f6a44248620e39" \
+            "${archive}" |
+            sha256sum --check -
+          mkdir -p "${install_dir}"
+          tar -xzf "${archive}" \
+            -C "${install_dir}" \
+            --strip-components=1 \
+            "${package}/cargo-audit"
+          "${install_dir}/cargo-audit" audit --file Cargo.lock
