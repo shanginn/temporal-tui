@@ -1,7 +1,6 @@
 class TemporalTui < Formula
   desc "Keyboard-first Temporal dashboard and control plane"
   homepage "@REPOSITORY@"
-  version "@VERSION@"
   license "MIT"
 
   on_macos do
@@ -16,8 +15,10 @@ class TemporalTui < Formula
 
   on_linux do
     depends_on arch: :x86_64
-    url "@REPOSITORY@/releases/download/v@VERSION@/@LINUX_ARCHIVE@"
-    sha256 "@LINUX_SHA@"
+    if Hardware::CPU.intel? && Hardware::CPU.is_64_bit?
+      url "@REPOSITORY@/releases/download/v@VERSION@/@LINUX_ARCHIVE@"
+      sha256 "@LINUX_SHA@"
+    end
   end
 
   def install
