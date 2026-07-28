@@ -94,7 +94,7 @@ cargo build --release --locked
 
 The release binary is `target/release/temporal-tui`.
 Source builds also require the Protobuf compiler (`protoc`); release CI pins
-the current stable 35.1 toolchain.
+the current stable 35.1 toolchain from checksum-verified official archives.
 On macOS, the Xcode Command Line Tools must be installed and their license
 accepted so Rust can invoke the system SDK and linker.
 

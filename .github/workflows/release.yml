@@ -41,11 +41,13 @@ jobs:
           test "v${package_version}" = "${GITHUB_REF_NAME}"
       - name: Install pinned Rust toolchain
         run: rustup toolchain install 1.97.1 --profile minimal
-      - name: Install pinned Protobuf compiler
-        uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3.0.0
-        with:
-          version: "35.1"
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Install pinned Protobuf compiler on Unix
+        if: runner.os != 'Windows'
+        run: scripts/install-protoc.sh
+      - name: Install pinned Protobuf compiler on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: scripts/install-protoc.ps1
       - name: Cache Rust build
         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
       - name: Build optimized binary

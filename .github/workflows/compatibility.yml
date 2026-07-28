@@ -36,10 +36,7 @@ jobs:
       - name: Install pinned Rust toolchain
         run: rustup toolchain install 1.97.1 --profile minimal
       - name: Install pinned Protobuf compiler
-        uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3.0.0
-        with:
-          version: "35.1"
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
+        run: scripts/install-protoc.sh
       - name: Cache Rust build
         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
       - name: Run read-only compatibility matrix
