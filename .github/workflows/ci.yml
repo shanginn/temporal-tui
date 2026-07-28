@@ -79,6 +79,16 @@ jobs:
         run: cargo build --locked --release
       - name: Smoke-test binary
         run: ${{ matrix.binary }} --version
+      - name: Verify standalone binary installer
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          version="$("${{ matrix.binary }}" --version | awk '{print $2}')"
+          archive="$(scripts/package.sh \
+            "${{ matrix.target }}" dist "${{ matrix.binary }}")"
+          scripts/installer-smoke.sh \
+            "${archive}" \
+            "${version}"
 
   live:
     name: Disposable Temporal live contract

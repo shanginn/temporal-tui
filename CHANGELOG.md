@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.0.2 — 2026-07-28
+
+- Add a checksum-verifying standalone installer for macOS ARM64/Intel and
+  Linux x86_64. It installs the prebuilt release without Homebrew, Rust, Xcode,
+  or a compiler.
+- Exercise clean install, in-place upgrade, support assets, checksum failure,
+  and unsafe-archive rejection on every supported Unix release runner.
+
 ## 1.0.1 — 2026-07-28
 
 - Publish the official `shanginn/homebrew-temporal-tui` tap and replace the

@@ -5,6 +5,33 @@ with Rust and [Ratatui](https://ratatui.rs/). It connects directly to a Temporal
 frontend through the official Rust client; the web UI and Temporal CLI are not
 required at runtime.
 
+## Install
+
+Install the latest prebuilt binary on macOS ARM64/Intel or Linux x86_64:
+
+```sh
+curl --proto '=https' --tlsv1.2 -LsSf \
+  https://github.com/shanginn/temporal-tui/releases/latest/download/temporal-tui-installer.sh \
+  -o temporal-tui-installer.sh
+sh temporal-tui-installer.sh
+rm temporal-tui-installer.sh
+```
+
+The installer verifies the release archive against `SHA256SUMS` and installs
+the binary, manpage, and completions below `~/.local`. It needs only standard
+operating-system tools: no Homebrew, Rust, Xcode, compiler, or `sudo`. It does
+not edit shell profiles; add `~/.local/bin` to `PATH` if necessary.
+
+Homebrew remains available as an optional package-manager route:
+
+```sh
+brew install shanginn/temporal-tui/temporal-tui
+```
+
+Homebrew can reject a macOS/Xcode combination during its own formula preflight
+before it reaches this prebuilt binary. If that happens, use the standalone
+installer above; `temporal-tui` itself has no Xcode runtime dependency.
+
 ## Capabilities
 
 - Browse workflow visibility results with server-backed cursor pagination,
@@ -98,13 +125,7 @@ the current stable 35.1 toolchain from checksum-verified official archives.
 On macOS, the Xcode Command Line Tools must be installed and their license
 accepted so Rust can invoke the system SDK and linker.
 
-Install the latest release with Homebrew:
-
-```sh
-brew install shanginn/temporal-tui/temporal-tui
-```
-
-Or build directly from GitHub:
+Build directly from GitHub:
 
 ```sh
 cargo install --locked --git https://github.com/shanginn/temporal-tui

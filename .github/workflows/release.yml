@@ -63,6 +63,13 @@ jobs:
         if: matrix.format == 'tgz'
         shell: bash
         run: scripts/package-smoke.sh "dist/temporal-tui-${GITHUB_REF_NAME}-${{ matrix.target }}.tgz"
+      - name: Verify standalone binary installer
+        if: matrix.format == 'tgz'
+        shell: bash
+        run: |
+          scripts/installer-smoke.sh \
+            "dist/temporal-tui-${GITHUB_REF_NAME}-${{ matrix.target }}.tgz" \
+            "${GITHUB_REF_NAME}"
       - name: Verify Windows clean install, upgrade, and uninstall
         if: matrix.format == 'zip'
         shell: pwsh
@@ -102,12 +109,13 @@ jobs:
       - name: Generate package-manager metadata and checksums
         shell: bash
         run: |
+          install -m 0755 scripts/install.sh dist/temporal-tui-installer.sh
           cd dist
           sha256sum temporal-tui-*.tgz temporal-tui-*.zip > ARCHIVE_SHA256SUMS
           cd ..
           scripts/generate-package-metadata.sh "${GITHUB_REF_NAME#v}" dist/ARCHIVE_SHA256SUMS dist
           cd dist
-          sha256sum temporal-tui-*.tgz temporal-tui-*.zip temporal-tui-*.cdx.json temporal-tui.rb temporal-tui.json > SHA256SUMS
+          sha256sum temporal-tui-*.tgz temporal-tui-*.zip temporal-tui-*.cdx.json temporal-tui-installer.sh temporal-tui.rb temporal-tui.json > SHA256SUMS
           rm ARCHIVE_SHA256SUMS
       - name: Attest release artifacts
         uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
