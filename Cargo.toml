@@ -1,12 +1,13 @@
 [package]
 name = "temporal-tui"
-version = "0.5.0"
+version = "1.0.0"
 edition = "2024"
 rust-version = "1.97.1"
 description = "A fast terminal dashboard and control plane for Temporal"
 license = "MIT"
 readme = "README.md"
 repository = "https://github.com/shanginn/temporal-tui"
+homepage = "https://github.com/shanginn/temporal-tui"
 keywords = ["temporal", "tui", "dashboard", "workflow", "ratatui"]
 categories = ["command-line-utilities"]
 
@@ -14,6 +15,7 @@ categories = ["command-line-utilities"]
 anyhow = "1.0.104"
 arboard = "3.6.1"
 async-trait = "0.1.91"
+atomic-write-file = "0.3.0"
 base64 = "0.23.0"
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "serde"] }
 clap = { version = "4.6.4", features = ["derive", "env"] }
@@ -38,6 +40,8 @@ unicode-width = "0.2.2"
 url = "2.5.8"
 
 [dev-dependencies]
+clap_complete = "4.6.8"
+clap_mangen = "0.3.0"
 pretty_assertions = "1.4.1"
 tempfile = "3.27.0"
 temporalio-macros = "0.5.0"
@@ -45,6 +49,16 @@ temporalio-sdk = { version = "0.5.0", default-features = false }
 temporalio-sdk-core = { version = "0.5.0", default-features = false }
 temporalio-workflow = "0.5.0"
 tokio = { version = "1.53.1", features = ["macros", "rt-multi-thread", "test-util"] }
+
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/{ name }-v{ version }-{ target }{ archive-suffix }"
+bin-dir = "{ name }-v{ version }-{ target }/{ bin }{ binary-ext }"
+
+[package.metadata.binstall.overrides.'cfg(unix)']
+pkg-fmt = "tgz"
+
+[package.metadata.binstall.overrides.'cfg(windows)']
+pkg-fmt = "zip"
 
 [profile.release]
 codegen-units = 1

@@ -10,9 +10,10 @@ use url::Url;
 
 use crate::model::{
     BatchOperationDetails, BatchOperationKind, BatchOperationPage, BatchOperationRequest,
-    BatchOperationSummary, ClusterInfo, HistoryPage, NamespaceSummary, ScheduleBackfillRequest,
-    ScheduleCreateRequest, ScheduleDetails, SchedulePage, ScheduleSummary, ScheduleUpdateRequest,
-    SearchAttributeSummary, TaskQueueSummary, WorkerDeploymentDetails, WorkerDeploymentPage,
+    BatchOperationSummary, Capability, CapabilityAvailability, ClusterInfo, HistoryPage,
+    NamespaceSummary, ScheduleBackfillRequest, ScheduleCreateRequest, ScheduleDetails,
+    SchedulePage, ScheduleSummary, ScheduleUpdateRequest, SearchAttributeSummary,
+    ServerCapabilities, TaskQueueSummary, WorkerDeploymentDetails, WorkerDeploymentPage,
     WorkerDeploymentSummary, WorkerDetails, WorkerPage, WorkerSummary, WorkflowCallResult,
     WorkflowCount, WorkflowDetails, WorkflowKey, WorkflowPage, WorkflowStatus, WorkflowSummary,
 };
@@ -215,6 +216,7 @@ pub enum Overlay {
     ProfilePicker {
         selected: usize,
     },
+    Capabilities,
     SearchAttributes {
         selected: usize,
     },
@@ -603,6 +605,10 @@ pub enum Command {
         request_id: u64,
         profile_name: String,
     },
+    LoadCapabilities {
+        request_id: u64,
+        namespace: String,
+    },
     LoadNamespaces {
         request_id: u64,
     },
@@ -848,6 +854,10 @@ pub enum Message {
         request_id: u64,
         result: Result<ProfileConnectionInfo, String>,
     },
+    CapabilitiesLoaded {
+        request_id: u64,
+        result: Result<ServerCapabilities, String>,
+    },
     NamespacesLoaded {
         request_id: u64,
         result: Result<Vec<NamespaceSummary>, String>,
@@ -1043,6 +1053,9 @@ pub struct App {
     pub pending_profile_name: Option<String>,
     pub view: View,
     pub cluster: Option<ClusterInfo>,
+    pub capabilities: Option<ServerCapabilities>,
+    pub capabilities_error: Option<String>,
+    pub loading_capabilities: bool,
     pub namespaces: Vec<NamespaceSummary>,
     pub workflows: Vec<WorkflowSummary>,
     pub workflow_count: Option<WorkflowCount>,
@@ -1110,6 +1123,7 @@ pub struct App {
     pub should_quit: bool,
     current_cluster_request: u64,
     current_profile_request: u64,
+    current_capabilities_request: u64,
     current_workflow_request: u64,
     current_count_request: u64,
     current_detail_request: u64,
@@ -1172,6 +1186,9 @@ impl App {
             pending_profile_name: None,
             view: View::Workflows,
             cluster: None,
+            capabilities: None,
+            capabilities_error: None,
+            loading_capabilities: false,
             namespaces: Vec::new(),
             workflows: Vec::new(),
             workflow_count: None,
@@ -1239,6 +1256,7 @@ impl App {
             should_quit: false,
             current_cluster_request: 0,
             current_profile_request: 0,
+            current_capabilities_request: 0,
             current_workflow_request: 0,
             current_count_request: 0,
             current_detail_request: 0,
@@ -1282,7 +1300,11 @@ impl App {
 
     /// Initial data fetches.
     pub fn bootstrap(&mut self) -> Vec<Command> {
-        let mut commands = vec![self.load_cluster(), self.load_namespaces()];
+        let mut commands = vec![
+            self.load_cluster(),
+            self.load_capabilities(),
+            self.load_namespaces(),
+        ];
         commands.extend(self.refresh_current_view(true));
         commands
     }
@@ -1345,6 +1367,24 @@ impl App {
                         Vec::new()
                     }
                 }
+            }
+            Message::CapabilitiesLoaded { request_id, result } => {
+                if request_id != self.current_capabilities_request {
+                    return Vec::new();
+                }
+                self.loading_capabilities = false;
+                match result {
+                    Ok(capabilities) => {
+                        self.capabilities = Some(capabilities);
+                        self.capabilities_error = None;
+                        self.apply_capability_degradation();
+                    }
+                    Err(error) => {
+                        self.capabilities_error = Some(error.clone());
+                        self.show_notice(error, NoticeKind::Error);
+                    }
+                }
+                Vec::new()
             }
             Message::NamespacesLoaded { request_id, result } => {
                 if request_id != self.current_namespace_request {
@@ -1902,7 +1942,9 @@ impl App {
                 }
             }
             KeyCode::Char('#') if self.view == View::Workflows => {
-                if self
+                if let Some(message) = self.blocked_capability(Capability::VisibilityAggregations) {
+                    self.show_notice(message, NoticeKind::Info);
+                } else if self
                     .workflow_count
                     .as_ref()
                     .is_none_or(|count| count.groups.is_empty())
@@ -1929,6 +1971,13 @@ impl App {
                     });
                 }
             }
+            KeyCode::Char('K') => {
+                self.overlay = Some(Overlay::Capabilities);
+                if self.loading_capabilities {
+                    return Vec::new();
+                }
+                return vec![self.load_capabilities()];
+            }
             KeyCode::Char('n') => {
                 if self.namespaces.is_empty() {
                     self.show_notice("No namespaces loaded", NoticeKind::Info);
@@ -1939,6 +1988,10 @@ impl App {
                 }
             }
             KeyCode::Char('A') => {
+                if let Some(message) = self.blocked_capability(Capability::SearchAttributes) {
+                    self.show_notice(message, NoticeKind::Info);
+                    return Vec::new();
+                }
                 self.overlay = Some(Overlay::SearchAttributes { selected: 0 });
                 return vec![self.load_search_attributes()];
             }
@@ -2035,6 +2088,11 @@ impl App {
                     return Vec::new();
                 }
             }
+            Overlay::Capabilities => match key.code {
+                KeyCode::Esc | KeyCode::Char('q' | 'K') => return Vec::new(),
+                KeyCode::Char('r') => return vec![self.load_capabilities()],
+                _ => {}
+            },
             Overlay::Query(input) => match key.code {
                 KeyCode::Esc => return Vec::new(),
                 KeyCode::Enter => {
@@ -2175,12 +2233,16 @@ impl App {
                         self.batch_operation_details = None;
                         self.search_attributes.clear();
                         self.search_attributes_error = None;
+                        self.capabilities = None;
+                        self.capabilities_error = None;
                         self.manual_task_queue_names.clear();
                         self.reset_worker_pagination();
                         self.reset_deployment_pagination();
                         self.reset_schedule_pagination();
                         self.reset_batch_pagination();
-                        return self.refresh_current_view(true);
+                        let mut commands = vec![self.load_capabilities()];
+                        commands.extend(self.refresh_current_view(true));
+                        return commands;
                     }
                     return Vec::new();
                 }
@@ -3238,6 +3300,10 @@ impl App {
             return;
         }
         if kind == WorkflowCallKind::Update {
+            if let Some(message) = self.blocked_capability(Capability::WorkflowUpdate) {
+                self.show_notice(message, NoticeKind::Info);
+                return;
+            }
             if self.read_only {
                 self.show_notice("Read-only mode blocks Workflow Updates", NoticeKind::Info);
                 return;
@@ -3271,6 +3337,10 @@ impl App {
     }
 
     fn open_pause_toggle(&mut self) {
+        if let Some(message) = self.blocked_capability(Capability::WorkflowPause) {
+            self.show_notice(message, NoticeKind::Info);
+            return;
+        }
         let Some(status) = self.selected_workflow().map(|workflow| workflow.status) else {
             self.show_notice("No workflow selected", NoticeKind::Info);
             return;
@@ -3313,6 +3383,10 @@ impl App {
     }
 
     fn open_deployment_current(&mut self) {
+        if let Some(message) = self.blocked_capability(Capability::WorkerDeployments) {
+            self.show_notice(message, NoticeKind::Info);
+            return;
+        }
         if self.read_only {
             self.show_notice(
                 "Read-only mode blocks Worker Deployment changes",
@@ -3348,6 +3422,10 @@ impl App {
     }
 
     fn open_deployment_ramp(&mut self) {
+        if let Some(message) = self.blocked_capability(Capability::WorkerDeployments) {
+            self.show_notice(message, NoticeKind::Info);
+            return;
+        }
         if self.read_only {
             self.show_notice(
                 "Read-only mode blocks Worker Deployment changes",
@@ -3393,6 +3471,10 @@ impl App {
     }
 
     fn open_batch_create(&mut self) {
+        if let Some(message) = self.blocked_capability(Capability::BatchOperations) {
+            self.show_notice(message, NoticeKind::Info);
+            return;
+        }
         if self.read_only {
             self.show_notice("Read-only mode blocks batch operations", NoticeKind::Info);
             return;
@@ -3542,6 +3624,10 @@ impl App {
     }
 
     fn schedule_mutation_available(&mut self) -> bool {
+        if let Some(message) = self.blocked_capability(Capability::Schedules) {
+            self.show_notice(message, NoticeKind::Info);
+            return false;
+        }
         if self.read_only {
             self.show_notice("Read-only mode blocks Schedule mutations", NoticeKind::Info);
             return false;
@@ -3554,6 +3640,58 @@ impl App {
             return false;
         }
         true
+    }
+
+    fn blocked_capability(&self, capability: Capability) -> Option<String> {
+        let summary = self.capabilities.as_ref()?.get(capability)?;
+        matches!(
+            summary.availability,
+            CapabilityAvailability::Unavailable | CapabilityAvailability::Restricted
+        )
+        .then(|| {
+            format!(
+                "{} is {}: {}",
+                capability.label(),
+                summary.availability.label().to_ascii_lowercase(),
+                summary.detail
+            )
+        })
+    }
+
+    fn apply_capability_degradation(&mut self) {
+        if let Some(message) = self.blocked_capability(Capability::WorkerHeartbeats) {
+            self.workers.clear();
+            self.worker_details = None;
+            self.workers_error = Some(message);
+            self.loading_workers = false;
+            self.loading_worker_details = false;
+        }
+        if let Some(message) = self.blocked_capability(Capability::WorkerDeployments) {
+            self.worker_deployments.clear();
+            self.worker_deployment_details = None;
+            self.worker_deployments_error = Some(message);
+            self.loading_worker_deployments = false;
+            self.loading_worker_deployment_details = false;
+        }
+        if let Some(message) = self.blocked_capability(Capability::Schedules) {
+            self.schedules.clear();
+            self.schedule_details = None;
+            self.schedules_error = Some(message);
+            self.loading_schedules = false;
+            self.loading_schedule_details = false;
+        }
+        if let Some(message) = self.blocked_capability(Capability::BatchOperations) {
+            self.batch_operations.clear();
+            self.batch_operation_details = None;
+            self.batch_operations_error = Some(message);
+            self.loading_batch_operations = false;
+            self.loading_batch_operation_details = false;
+        }
+        if let Some(message) = self.blocked_capability(Capability::SearchAttributes) {
+            self.search_attributes.clear();
+            self.search_attributes_error = Some(message);
+            self.loading_search_attributes = false;
+        }
     }
 
     fn switch_view(&mut self, view: View) -> Vec<Command> {
@@ -3642,6 +3780,14 @@ impl App {
     }
 
     fn refresh_workers(&mut self, reset_pagination: bool) -> Vec<Command> {
+        if let Some(message) = self.blocked_capability(Capability::WorkerHeartbeats) {
+            self.workers.clear();
+            self.worker_details = None;
+            self.workers_error = Some(message);
+            self.loading_workers = false;
+            self.loading_worker_details = false;
+            return Vec::new();
+        }
         if reset_pagination {
             self.reset_worker_pagination();
         }
@@ -3659,6 +3805,14 @@ impl App {
     }
 
     fn refresh_worker_deployments(&mut self, reset_pagination: bool) -> Vec<Command> {
+        if let Some(message) = self.blocked_capability(Capability::WorkerDeployments) {
+            self.worker_deployments.clear();
+            self.worker_deployment_details = None;
+            self.worker_deployments_error = Some(message);
+            self.loading_worker_deployments = false;
+            self.loading_worker_deployment_details = false;
+            return Vec::new();
+        }
         if reset_pagination {
             self.reset_deployment_pagination();
         }
@@ -3675,6 +3829,14 @@ impl App {
     }
 
     fn refresh_batch_operations(&mut self, reset_pagination: bool) -> Vec<Command> {
+        if let Some(message) = self.blocked_capability(Capability::BatchOperations) {
+            self.batch_operations.clear();
+            self.batch_operation_details = None;
+            self.batch_operations_error = Some(message);
+            self.loading_batch_operations = false;
+            self.loading_batch_operation_details = false;
+            return Vec::new();
+        }
         if reset_pagination {
             self.reset_batch_pagination();
         }
@@ -3870,6 +4032,14 @@ impl App {
     }
 
     fn refresh_schedules(&mut self, reset_pagination: bool) -> Vec<Command> {
+        if let Some(message) = self.blocked_capability(Capability::Schedules) {
+            self.schedules.clear();
+            self.schedule_details = None;
+            self.schedules_error = Some(message);
+            self.loading_schedules = false;
+            self.loading_schedule_details = false;
+            return Vec::new();
+        }
         if reset_pagination {
             self.reset_schedule_pagination();
         }
@@ -4127,6 +4297,16 @@ impl App {
         Command::LoadCluster { request_id }
     }
 
+    fn load_capabilities(&mut self) -> Command {
+        let request_id = self.next_request_id();
+        self.current_capabilities_request = request_id;
+        self.loading_capabilities = true;
+        Command::LoadCapabilities {
+            request_id,
+            namespace: self.namespace.clone(),
+        }
+    }
+
     fn load_namespaces(&mut self) -> Command {
         let request_id = self.next_request_id();
         self.current_namespace_request = request_id;
@@ -4147,6 +4327,7 @@ impl App {
         let barrier = self.next_request_id();
         self.current_cluster_request = barrier;
         self.current_profile_request = barrier;
+        self.current_capabilities_request = barrier;
         self.current_workflow_request = barrier;
         self.current_count_request = barrier;
         self.current_detail_request = barrier;
@@ -4171,6 +4352,9 @@ impl App {
 
     fn clear_connected_state(&mut self) {
         self.cluster = None;
+        self.capabilities = None;
+        self.capabilities_error = None;
+        self.loading_capabilities = false;
         self.namespaces.clear();
         self.workflows.clear();
         self.workflow_count = None;
@@ -4510,6 +4694,17 @@ mod tests {
         }
     }
 
+    fn capability(
+        capability: Capability,
+        availability: CapabilityAvailability,
+    ) -> crate::model::CapabilitySummary {
+        crate::model::CapabilitySummary {
+            capability,
+            availability,
+            detail: "test negotiation evidence".to_string(),
+        }
+    }
+
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
     }
@@ -4525,9 +4720,10 @@ mod tests {
     fn bootstrap_requests_all_dashboard_data() {
         let commands = app().bootstrap();
         assert!(matches!(commands[0], Command::LoadCluster { .. }));
-        assert!(matches!(commands[1], Command::LoadNamespaces { .. }));
-        assert!(matches!(commands[2], Command::LoadWorkflows { .. }));
-        assert!(matches!(commands[3], Command::CountWorkflows { .. }));
+        assert!(matches!(commands[1], Command::LoadCapabilities { .. }));
+        assert!(matches!(commands[2], Command::LoadNamespaces { .. }));
+        assert!(matches!(commands[3], Command::LoadWorkflows { .. }));
+        assert!(matches!(commands[4], Command::CountWorkflows { .. }));
     }
 
     #[test]
@@ -4752,7 +4948,8 @@ mod tests {
         app.handle_key(key(KeyCode::Down));
         let commands = app.handle_key(key(KeyCode::Enter));
         assert_eq!(app.namespace, "payments");
-        assert!(matches!(commands[0], Command::LoadWorkflows { .. }));
+        assert!(matches!(commands[0], Command::LoadCapabilities { .. }));
+        assert!(matches!(commands[1], Command::LoadWorkflows { .. }));
     }
 
     #[test]
@@ -4824,8 +5021,9 @@ mod tests {
         assert!(app.workflows.is_empty());
         assert!(app.batch_operations.is_empty());
         assert!(matches!(refresh[0], Command::LoadCluster { .. }));
-        assert!(matches!(refresh[1], Command::LoadNamespaces { .. }));
-        assert!(matches!(refresh[2], Command::LoadBatchOperations { .. }));
+        assert!(matches!(refresh[1], Command::LoadCapabilities { .. }));
+        assert!(matches!(refresh[2], Command::LoadNamespaces { .. }));
+        assert!(matches!(refresh[3], Command::LoadBatchOperations { .. }));
 
         app.handle_message(Message::ClusterLoaded {
             request_id: stale_cluster_request,
@@ -4869,6 +5067,61 @@ mod tests {
         assert_eq!(app.namespace, "development");
         assert_eq!(app.workflows[0].key.workflow_id, "dev-workflow");
         assert_eq!(app.notice.as_ref().unwrap().kind, NoticeKind::Error);
+    }
+
+    #[test]
+    fn capability_negotiation_degrades_only_unsupported_surfaces() {
+        let mut app = app();
+        app.workflows = vec![workflow("still-visible", WorkflowStatus::Running)];
+        let load = app.handle_key(key(KeyCode::Char('K')));
+        let Command::LoadCapabilities { request_id, .. } = &load[0] else {
+            panic!("expected capability negotiation");
+        };
+        app.handle_message(Message::CapabilitiesLoaded {
+            request_id: *request_id,
+            result: Ok(ServerCapabilities {
+                server_version: "1.31.2".to_string(),
+                namespace: "default".to_string(),
+                features: vec![
+                    capability(
+                        Capability::WorkerHeartbeats,
+                        CapabilityAvailability::Unavailable,
+                    ),
+                    capability(
+                        Capability::WorkflowUpdate,
+                        CapabilityAvailability::Restricted,
+                    ),
+                    capability(Capability::Schedules, CapabilityAvailability::Unknown),
+                ],
+            }),
+        });
+        app.handle_key(key(KeyCode::Esc));
+
+        let workers = app.handle_key(key(KeyCode::Char('3')));
+        assert!(workers.is_empty());
+        assert_eq!(app.view, View::Workers);
+        assert!(
+            app.workers_error
+                .as_deref()
+                .is_some_and(|error| error.contains("unavailable"))
+        );
+
+        app.handle_key(key(KeyCode::Char('1')));
+        assert_eq!(app.workflows[0].key.workflow_id, "still-visible");
+        assert!(app.handle_key(key(KeyCode::Char('U'))).is_empty());
+        assert!(
+            app.notice
+                .as_ref()
+                .is_some_and(|notice| notice.text.contains("restricted"))
+        );
+
+        let schedules = app.handle_key(key(KeyCode::Char('5')));
+        assert!(
+            schedules
+                .iter()
+                .any(|command| matches!(command, Command::LoadSchedules { .. })),
+            "unknown capability status must remain optimistic"
+        );
     }
 
     #[test]

@@ -20,8 +20,9 @@ use std::{
 use base64::prelude::*;
 use temporal_tui::{
     model::{
-        BatchOperationKind, BatchOperationRequest, ScheduleBackfillRequest, ScheduleCreateRequest,
-        ScheduleUpdateRequest, WorkflowKey, WorkflowStatus,
+        BatchOperationKind, BatchOperationRequest, Capability, CapabilityAvailability,
+        ScheduleBackfillRequest, ScheduleCreateRequest, ScheduleUpdateRequest, WorkflowKey,
+        WorkflowStatus,
     },
     service::{GrpcTemporalService, PayloadCodecConfig, TemporalConnectionConfig, TemporalService},
 };
@@ -258,6 +259,32 @@ async fn run_live_dashboard_and_control_operations() {
     })
     .await
     .expect("both Worker Deployment versions should register");
+    let capabilities = service
+        .server_capabilities("default")
+        .await
+        .expect("negotiate server capabilities");
+    assert_eq!(capabilities.namespace, "default");
+    assert!(!capabilities.server_version.is_empty());
+    for expected in [
+        Capability::WorkflowUpdate,
+        Capability::WorkflowPause,
+        Capability::Schedules,
+        Capability::WorkerHeartbeats,
+        Capability::WorkerDeployments,
+        Capability::BatchOperations,
+        Capability::SearchAttributes,
+    ] {
+        let negotiated = capabilities
+            .get(expected)
+            .unwrap_or_else(|| panic!("missing negotiated capability: {}", expected.label()));
+        assert_eq!(
+            negotiated.availability,
+            CapabilityAvailability::Available,
+            "{} should be available: {}",
+            expected.label(),
+            negotiated.detail
+        );
+    }
     service
         .set_worker_deployment_current_version("default", &control_deployment, &control_build_v1)
         .await

@@ -223,6 +223,16 @@ async fn execute(command: Command, service: &dyn TemporalService) -> Message {
         Command::SwitchProfile { .. } => {
             unreachable!("profile switching is handled by the runtime dispatcher")
         }
+        Command::LoadCapabilities {
+            request_id,
+            namespace,
+        } => Message::CapabilitiesLoaded {
+            request_id,
+            result: service
+                .server_capabilities(&namespace)
+                .await
+                .map_err(|error| error.to_string()),
+        },
         Command::LoadNamespaces { request_id } => Message::NamespacesLoaded {
             request_id,
             result: service

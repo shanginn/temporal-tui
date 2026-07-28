@@ -20,7 +20,9 @@ use crate::{
         ScheduleEditForm, SearchAttributeAddField, SearchAttributeAddForm, SignalField, SignalForm,
         TextInput, View, WorkflowCallForm, WorkflowCallKind,
     },
-    model::{FailureSummary, StructuredField, WorkflowCallResult, WorkflowStatus},
+    model::{
+        CapabilityAvailability, FailureSummary, StructuredField, WorkflowCallResult, WorkflowStatus,
+    },
 };
 
 const MIN_WIDTH: u16 = 58;
@@ -31,6 +33,7 @@ pub fn render(frame: &mut Frame<'_>, app: &App) {
     let area = frame.area();
     if area.width < MIN_WIDTH || area.height < MIN_HEIGHT {
         render_too_small(frame, area);
+        sanitize_terminal_buffer(frame);
         return;
     }
 
@@ -65,6 +68,7 @@ pub fn render(frame: &mut Frame<'_>, app: &App) {
             Overlay::ProfilePicker { selected } => {
                 render_profiles(frame, area, app, *selected, theme);
             }
+            Overlay::Capabilities => render_capabilities(frame, area, app, theme),
             Overlay::SearchAttributes { selected } => {
                 render_search_attributes(frame, area, app, *selected, theme);
             }
@@ -121,6 +125,36 @@ pub fn render(frame: &mut Frame<'_>, app: &App) {
             }
         }
     }
+    sanitize_terminal_buffer(frame);
+}
+
+fn sanitize_terminal_buffer(frame: &mut Frame<'_>) {
+    for cell in &mut frame.buffer_mut().content {
+        let symbol = cell.symbol();
+        if symbol.chars().any(is_unsafe_terminal_character) {
+            let sanitized = symbol
+                .chars()
+                .filter(|character| !is_unsafe_terminal_character(*character))
+                .collect::<String>();
+            cell.set_symbol(if sanitized.is_empty() {
+                " "
+            } else {
+                &sanitized
+            });
+        }
+    }
+}
+
+const fn is_unsafe_terminal_character(character: char) -> bool {
+    character.is_control()
+        || matches!(
+            character,
+            '\u{061c}'
+                | '\u{200e}'
+                | '\u{200f}'
+                | '\u{202a}'..='\u{202e}'
+                | '\u{2066}'..='\u{2069}'
+        )
 }
 
 fn render_header(frame: &mut Frame<'_>, app: &App, area: Rect, theme: Theme) {
@@ -1307,6 +1341,8 @@ fn render_footer(frame: &mut Frame<'_>, app: &App, area: Rect, theme: Theme) {
             Span::raw("  "),
             key_hint("P", "profile", theme),
             Span::raw("  "),
+            key_hint("K", "capabilities", theme),
+            Span::raw("  "),
             key_hint("?", "help", theme),
             Span::raw("  "),
             key_hint("q", "quit", theme),
@@ -1355,6 +1391,11 @@ fn render_help(frame: &mut Frame<'_>, area: Rect, theme: Theme) {
             theme,
         ),
         help_line("P", "switch configured Temporal connection profile", theme),
+        help_line(
+            "K",
+            "show negotiated server and namespace capabilities",
+            theme,
+        ),
         help_line("r", "refresh now", theme),
         help_line("a", "toggle automatic refresh", theme),
         help_line("H", "load the next older history page", theme),
@@ -1641,6 +1682,73 @@ fn render_profiles(frame: &mut Frame<'_>, area: Rect, app: &App, selected: usize
     let mut state =
         TableState::default().with_selected((!app.profiles.is_empty()).then_some(selected));
     frame.render_stateful_widget(table, popup, &mut state);
+}
+
+fn render_capabilities(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
+    let popup = centered(area, 104, 18);
+    frame.render_widget(Clear, popup);
+    let title = app.capabilities.as_ref().map_or_else(
+        || " Server capabilities ".to_string(),
+        |capabilities| {
+            format!(
+                " Server capabilities · {} · {} ",
+                capabilities.server_version, capabilities.namespace
+            )
+        },
+    );
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(theme.accent())
+        .title(Span::styled(title, theme.title()))
+        .title_bottom(
+            Line::from(" read-only negotiation · r refresh · esc close ")
+                .alignment(Alignment::Right)
+                .style(theme.muted()),
+        );
+    let Some(capabilities) = &app.capabilities else {
+        let message = app
+            .capabilities_error
+            .as_deref()
+            .unwrap_or(if app.loading_capabilities {
+                "Negotiating server and namespace capabilities…"
+            } else {
+                "No capability snapshot loaded"
+            });
+        frame.render_widget(
+            Paragraph::new(message)
+                .alignment(Alignment::Center)
+                .wrap(Wrap { trim: true })
+                .style(theme.muted())
+                .block(block.padding(Padding::vertical(2))),
+            popup,
+        );
+        return;
+    };
+    let rows = capabilities.features.iter().map(|feature| {
+        let style = match feature.availability {
+            CapabilityAvailability::Available => theme.success(),
+            CapabilityAvailability::Unavailable => theme.error(),
+            CapabilityAvailability::Restricted => theme.warning(),
+            CapabilityAvailability::Unknown => theme.muted(),
+        };
+        Row::new([
+            feature.capability.label(),
+            feature.availability.label(),
+            feature.detail.as_str(),
+        ])
+        .style(style)
+    });
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Length(28),
+            Constraint::Length(13),
+            Constraint::Fill(1),
+        ],
+    )
+    .header(Row::new(["FEATURE", "STATUS", "EVIDENCE"]).style(theme.table_header()))
+    .block(block);
+    frame.render_widget(table, popup);
 }
 
 fn render_namespaces(frame: &mut Frame<'_>, area: Rect, app: &App, selected: usize, theme: Theme) {
@@ -3311,12 +3419,13 @@ mod tests {
     use crate::{
         app::{AppConfig, Overlay, ProfileSummary},
         model::{
-            BatchOperationDetails, BatchOperationSummary, ClusterInfo, DeploymentVersion,
-            DeploymentVersionSummary, HistoryEventSummary, PollerSummary, ScheduleActionResult,
-            ScheduleDetails, ScheduleSummary, SearchAttributeSummary, StructuredField,
-            TaskQueueStats, TaskQueueSummary, TaskQueueType, WorkerDeploymentDetails,
-            WorkerDeploymentSummary, WorkerDetails, WorkerSlots, WorkerSummary, WorkflowCallResult,
-            WorkflowCount, WorkflowCountGroup, WorkflowDetails, WorkflowKey, WorkflowSummary,
+            BatchOperationDetails, BatchOperationSummary, Capability, CapabilitySummary,
+            ClusterInfo, DeploymentVersion, DeploymentVersionSummary, HistoryEventSummary,
+            PollerSummary, ScheduleActionResult, ScheduleDetails, ScheduleSummary,
+            SearchAttributeSummary, ServerCapabilities, StructuredField, TaskQueueStats,
+            TaskQueueSummary, TaskQueueType, WorkerDeploymentDetails, WorkerDeploymentSummary,
+            WorkerDetails, WorkerSlots, WorkerSummary, WorkflowCallResult, WorkflowCount,
+            WorkflowCountGroup, WorkflowDetails, WorkflowKey, WorkflowSummary,
         },
     };
 
@@ -3818,10 +3927,63 @@ mod tests {
     }
 
     #[test]
+    fn renders_negotiated_capability_evidence_and_statuses() {
+        let mut app = sample_app();
+        app.capabilities = Some(ServerCapabilities {
+            server_version: "1.31.2".to_string(),
+            namespace: "default".to_string(),
+            features: vec![
+                CapabilitySummary {
+                    capability: Capability::Schedules,
+                    availability: CapabilityAvailability::Available,
+                    detail: "GetSystemInfo reported support".to_string(),
+                },
+                CapabilitySummary {
+                    capability: Capability::WorkerHeartbeats,
+                    availability: CapabilityAvailability::Unavailable,
+                    detail: "DescribeNamespace reported the feature disabled".to_string(),
+                },
+                CapabilitySummary {
+                    capability: Capability::SearchAttributes,
+                    availability: CapabilityAvailability::Restricted,
+                    detail: "read-only endpoint probe returned PermissionDenied".to_string(),
+                },
+            ],
+        });
+        app.overlay = Some(Overlay::Capabilities);
+        let output = rendered(&app, 130, 36);
+        assert!(output.contains("Server capabilities · 1.31.2 · default"));
+        assert!(output.contains("Schedules"));
+        assert!(output.contains("AVAILABLE"));
+        assert!(output.contains("Worker heartbeats"));
+        assert!(output.contains("UNAVAILABLE"));
+        assert!(output.contains("RESTRICTED"));
+        assert!(output.contains("read-only negotiation"));
+    }
+
+    #[test]
     fn renders_small_terminal_fallback() {
         let output = rendered(&sample_app(), 40, 10);
         assert!(output.contains("needs at least"));
         assert!(output.contains("40×10"));
+    }
+
+    #[test]
+    fn strips_terminal_and_bidi_control_sequences_from_the_final_frame() {
+        let mut app = sample_app();
+        app.cluster.as_mut().unwrap().cluster_name =
+            "cluster\u{1b}]8;;https://attacker.invalid\u{7}".to_string();
+        app.namespace = "safe\u{202e}txt".to_string();
+
+        let output = rendered(&app, 120, 32);
+
+        assert!(output.contains("cluster"));
+        assert!(output.contains("safetxt"));
+        assert!(
+            !output
+                .chars()
+                .any(|character| character != '\n' && is_unsafe_terminal_character(character))
+        );
     }
 
     #[test]

@@ -12,7 +12,7 @@ use url::Url;
 
 use crate::service::{ClientTlsConfig, PayloadCodecConfig, TemporalConnectionConfig};
 
-const CONFIG_SCHEMA_VERSION: u32 = 1;
+const CONFIG_SCHEMA_VERSION: u32 = 2;
 const KEYRING_SERVICE: &str = "io.temporal.temporal-tui";
 
 /// Persisted application settings. Secret values are represented only by references.
@@ -23,6 +23,7 @@ pub struct UserConfig {
     pub default_profile: Option<String>,
     pub profiles: BTreeMap<String, ConnectionProfile>,
     pub filters: BTreeMap<String, SavedFilter>,
+    pub ui: UiPreferences,
 }
 
 impl Default for UserConfig {
@@ -32,6 +33,7 @@ impl Default for UserConfig {
             default_profile: None,
             profiles: BTreeMap::new(),
             filters: BTreeMap::new(),
+            ui: UiPreferences::default(),
         }
     }
 }
@@ -70,7 +72,73 @@ impl UserConfig {
                 bail!("filter `{name}` contains a NUL byte");
             }
         }
+        self.ui.validate()?;
         Ok(())
+    }
+}
+
+/// Persisted defaults for the interactive terminal experience.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct UiPreferences {
+    pub page_size: usize,
+    pub refresh_seconds: u64,
+    pub auto_refresh: bool,
+    pub color: bool,
+}
+
+impl Default for UiPreferences {
+    fn default() -> Self {
+        Self {
+            page_size: 200,
+            refresh_seconds: 5,
+            auto_refresh: true,
+            color: true,
+        }
+    }
+}
+
+impl UiPreferences {
+    fn validate(&self) -> Result<()> {
+        if !(1..=5_000).contains(&self.page_size) {
+            bail!("ui.page_size must be between 1 and 5000");
+        }
+        if !(1..=3_600).contains(&self.refresh_seconds) {
+            bail!("ui.refresh_seconds must be between 1 and 3600");
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct LegacyUserConfigV1 {
+    schema_version: u32,
+    default_profile: Option<String>,
+    profiles: BTreeMap<String, ConnectionProfile>,
+    filters: BTreeMap<String, SavedFilter>,
+}
+
+impl Default for LegacyUserConfigV1 {
+    fn default() -> Self {
+        Self {
+            schema_version: 1,
+            default_profile: None,
+            profiles: BTreeMap::new(),
+            filters: BTreeMap::new(),
+        }
+    }
+}
+
+impl From<LegacyUserConfigV1> for UserConfig {
+    fn from(legacy: LegacyUserConfigV1) -> Self {
+        Self {
+            schema_version: CONFIG_SCHEMA_VERSION,
+            default_profile: legacy.default_profile,
+            profiles: legacy.profiles,
+            filters: legacy.filters,
+            ui: UiPreferences::default(),
+        }
     }
 }
 
@@ -107,9 +175,7 @@ impl Default for ConnectionProfile {
 
 impl ConnectionProfile {
     fn validate(&self) -> Result<()> {
-        if self.address.trim().is_empty() {
-            bail!("address must not be empty");
-        }
+        validate_temporal_address(&self.address)?;
         if self.namespace.trim().is_empty() {
             bail!("namespace must not be empty");
         }
@@ -120,6 +186,12 @@ impl ConnectionProfile {
             let parsed = Url::parse(url).context("web_ui_url is not a valid URL")?;
             if !matches!(parsed.scheme(), "http" | "https") {
                 bail!("web_ui_url must use http or https");
+            }
+            if !parsed.username().is_empty() || parsed.password().is_some() {
+                bail!("web_ui_url must not contain credentials");
+            }
+            if parsed.fragment().is_some() {
+                bail!("web_ui_url must not contain a fragment");
             }
         }
         for key in self.headers.keys().chain(self.secret_headers.keys()) {
@@ -137,8 +209,12 @@ impl ConnectionProfile {
         {
             bail!("sensitive headers must use secret_headers");
         }
-        if self.headers.values().any(|value| value.contains('\0')) {
-            bail!("header values must not contain NUL bytes");
+        if self
+            .headers
+            .values()
+            .any(|value| contains_invalid_header_bytes(value))
+        {
+            bail!("header values must not contain NUL, CR, or LF bytes");
         }
         if let Some(secret) = &self.api_key {
             secret.validate()?;
@@ -293,7 +369,8 @@ impl ConfigStore {
     ///
     /// # Errors
     ///
-    /// Returns an error when the file is unreadable, malformed, or invalid.
+    /// Returns an error when the file is unreadable, malformed, invalid, from
+    /// an unsupported schema, or cannot be migrated safely.
     pub fn load(&self) -> Result<UserConfig> {
         let raw = match fs::read_to_string(&self.path) {
             Ok(raw) => raw,
@@ -305,12 +382,34 @@ impl ConfigStore {
                     .with_context(|| format!("could not read {}", self.path.display()));
             }
         };
-        let config: UserConfig = toml::from_str(&raw)
+        let document: toml::Value = toml::from_str(&raw)
             .with_context(|| format!("could not parse {}", self.path.display()))?;
-        config
-            .validate()
-            .with_context(|| format!("could not validate {}", self.path.display()))?;
-        Ok(config)
+        let schema_version = document
+            .get("schema_version")
+            .and_then(toml::Value::as_integer)
+            .context("config is missing an integer schema_version")
+            .and_then(|version| {
+                u32::try_from(version)
+                    .context("config schema_version is outside the supported range")
+            })?;
+
+        match schema_version {
+            CONFIG_SCHEMA_VERSION => {
+                let config: UserConfig = toml::from_str(&raw)
+                    .with_context(|| format!("could not parse {}", self.path.display()))?;
+                config
+                    .validate()
+                    .with_context(|| format!("could not validate {}", self.path.display()))?;
+                Ok(config)
+            }
+            1 => self.migrate_v1(&raw),
+            version if version > CONFIG_SCHEMA_VERSION => bail!(
+                "config schema {version} is newer than supported schema {CONFIG_SCHEMA_VERSION}; upgrade temporal-tui"
+            ),
+            version => bail!(
+                "unsupported config schema {version}; supported schema is {CONFIG_SCHEMA_VERSION}"
+            ),
+        }
     }
 
     /// Atomically save a validated config with user-only permissions on Unix.
@@ -329,32 +428,79 @@ impl ConfigStore {
         fs::create_dir_all(parent)
             .with_context(|| format!("could not create {}", parent.display()))?;
 
-        let temporary_path = self
+        let mut options = atomic_write_file::OpenOptions::new();
+        #[cfg(unix)]
+        {
+            atomic_write_file::unix::OpenOptionsExt::preserve_mode(&mut options, false);
+            std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+        }
+        let mut file = options.open(&self.path).with_context(|| {
+            format!(
+                "could not create an atomic update for {}",
+                self.path.display()
+            )
+        })?;
+        file.write_all(serialized.as_bytes())
+            .with_context(|| format!("could not write {}", self.path.display()))?;
+        file.commit()
+            .with_context(|| format!("could not atomically replace {}", self.path.display()))?;
+        Ok(())
+    }
+
+    fn migrate_v1(&self, raw: &str) -> Result<UserConfig> {
+        let legacy: LegacyUserConfigV1 = toml::from_str(raw)
+            .with_context(|| format!("could not parse schema 1 config {}", self.path.display()))?;
+        if legacy.schema_version != 1 {
+            bail!(
+                "schema 1 migration received schema {}",
+                legacy.schema_version
+            );
+        }
+        let migrated = UserConfig::from(legacy);
+        migrated
+            .validate()
+            .context("schema 1 config is invalid after migration")?;
+        self.save_migration_backup(1, raw.as_bytes())?;
+        self.save(&migrated)
+            .context("could not persist migrated schema 2 config")?;
+        Ok(migrated)
+    }
+
+    fn save_migration_backup(&self, schema_version: u32, original: &[u8]) -> Result<()> {
+        let backup_path = self
             .path
-            .with_extension(format!("toml.tmp-{}", std::process::id()));
+            .with_extension(format!("toml.v{schema_version}.bak"));
         let mut options = OpenOptions::new();
-        options.write(true).create(true).truncate(true);
+        options.write(true).create_new(true);
         #[cfg(unix)]
         {
             use std::os::unix::fs::OpenOptionsExt;
             options.mode(0o600);
         }
-        let mut file = options
-            .open(&temporary_path)
-            .with_context(|| format!("could not create {}", temporary_path.display()))?;
-        file.write_all(serialized.as_bytes())
-            .with_context(|| format!("could not write {}", temporary_path.display()))?;
-        file.sync_all()
-            .with_context(|| format!("could not sync {}", temporary_path.display()))?;
-        drop(file);
-        fs::rename(&temporary_path, &self.path).with_context(|| {
-            format!(
-                "could not replace {} with {}",
-                self.path.display(),
-                temporary_path.display()
-            )
-        })?;
-        Ok(())
+        match options.open(&backup_path) {
+            Ok(mut file) => {
+                file.write_all(original)
+                    .with_context(|| format!("could not write {}", backup_path.display()))?;
+                file.sync_all()
+                    .with_context(|| format!("could not sync {}", backup_path.display()))?;
+                Ok(())
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                let existing = fs::read(&backup_path)
+                    .with_context(|| format!("could not read {}", backup_path.display()))?;
+                if existing == original {
+                    Ok(())
+                } else {
+                    bail!(
+                        "migration backup {} already exists with different contents",
+                        backup_path.display()
+                    )
+                }
+            }
+            Err(error) => {
+                Err(error).with_context(|| format!("could not create {}", backup_path.display()))
+            }
+        }
     }
 
     /// Resolve a profile and all referenced secrets.
@@ -388,6 +534,18 @@ impl ConfigStore {
                 key.clone(),
                 resolve_secret(profile_name, &format!("header/{key}"), source)?,
             );
+        }
+        if api_key
+            .as_deref()
+            .is_some_and(|value| value.is_empty() || contains_invalid_header_bytes(value))
+        {
+            bail!("resolved API key is empty or contains invalid bytes");
+        }
+        if headers
+            .values()
+            .any(|value| contains_invalid_header_bytes(value))
+        {
+            bail!("resolved gRPC header contains invalid bytes");
         }
         let payload_codec = profile
             .payload_codec
@@ -518,6 +676,38 @@ fn validate_header_name(name: &str) -> Result<()> {
     Ok(())
 }
 
+fn validate_temporal_address(address: &str) -> Result<()> {
+    let address = address.trim();
+    if address.is_empty() {
+        bail!("address must not be empty");
+    }
+    if address.chars().any(char::is_control) {
+        bail!("address must not contain control characters");
+    }
+    let normalized = if address.contains("://") {
+        address.to_string()
+    } else {
+        format!("http://{address}")
+    };
+    let parsed = Url::parse(&normalized).context("address is not a valid Temporal URL")?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        bail!("address must use http or https when a scheme is supplied");
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        bail!("address must not contain credentials");
+    }
+    if parsed.path() != "/" || parsed.query().is_some() || parsed.fragment().is_some() {
+        bail!("address must not contain a path, query, or fragment");
+    }
+    Ok(())
+}
+
+fn contains_invalid_header_bytes(value: &str) -> bool {
+    value
+        .bytes()
+        .any(|byte| matches!(byte, b'\0' | b'\r' | b'\n'))
+}
+
 fn looks_sensitive_header_name(name: &str) -> bool {
     ["authorization", "cookie", "token", "secret", "api-key"]
         .iter()
@@ -530,12 +720,16 @@ mod tests {
 
     use super::*;
 
+    fn store_in(directory: &TempDir) -> ConfigStore {
+        ConfigStore {
+            path: directory.path().join("config.toml"),
+        }
+    }
+
     #[test]
     fn config_round_trip_never_contains_secret_material() {
         let directory = TempDir::new().unwrap();
-        let store = ConfigStore {
-            path: directory.path().join("config.toml"),
-        };
+        let store = store_in(&directory);
         let mut config = UserConfig {
             default_profile: Some("cloud".to_string()),
             ..UserConfig::default()
@@ -566,6 +760,109 @@ mod tests {
     }
 
     #[test]
+    fn migrates_schema_one_once_and_keeps_an_exact_private_backup() {
+        let directory = TempDir::new().unwrap();
+        let store = store_in(&directory);
+        let legacy = "schema_version = 1\ndefault_profile = \"dev\"\n\n[profiles.dev]\naddress = \"127.0.0.1:7233\"\nnamespace = \"default\"\n";
+        fs::write(store.path(), legacy).unwrap();
+
+        let migrated = store.load().unwrap();
+        assert_eq!(migrated.schema_version, CONFIG_SCHEMA_VERSION);
+        assert_eq!(migrated.default_profile.as_deref(), Some("dev"));
+        assert_eq!(migrated.ui, UiPreferences::default());
+
+        let backup = store.path().with_extension("toml.v1.bak");
+        assert_eq!(fs::read(&backup).unwrap(), legacy.as_bytes());
+        let persisted = fs::read_to_string(store.path()).unwrap();
+        assert!(persisted.contains("schema_version = 2"));
+        assert!(persisted.contains("[ui]"));
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            assert_eq!(
+                fs::metadata(store.path()).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+            assert_eq!(
+                fs::metadata(&backup).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+
+        let backup_before = fs::read(&backup).unwrap();
+        assert_eq!(store.load().unwrap(), migrated);
+        assert_eq!(fs::read(&backup).unwrap(), backup_before);
+
+        fs::write(store.path(), legacy).unwrap();
+        assert_eq!(store.load().unwrap(), migrated);
+        assert_eq!(fs::read(&backup).unwrap(), backup_before);
+    }
+
+    #[test]
+    fn refuses_to_overwrite_a_conflicting_migration_backup() {
+        let directory = TempDir::new().unwrap();
+        let store = store_in(&directory);
+        let legacy = "schema_version = 1\n";
+        fs::write(store.path(), legacy).unwrap();
+        fs::write(
+            store.path().with_extension("toml.v1.bak"),
+            "different original",
+        )
+        .unwrap();
+
+        let error = store.load().unwrap_err().to_string();
+        assert!(error.contains("already exists with different contents"));
+        assert_eq!(fs::read_to_string(store.path()).unwrap(), legacy);
+    }
+
+    #[test]
+    fn rejects_missing_newer_and_invalid_ui_schemas() {
+        let directory = TempDir::new().unwrap();
+        let store = store_in(&directory);
+
+        fs::write(store.path(), "default_profile = \"dev\"\n").unwrap();
+        assert!(
+            store
+                .load()
+                .unwrap_err()
+                .to_string()
+                .contains("missing an integer schema_version")
+        );
+
+        fs::write(store.path(), "schema_version = 99\n").unwrap();
+        assert!(
+            store
+                .load()
+                .unwrap_err()
+                .to_string()
+                .contains("newer than supported")
+        );
+
+        fs::write(store.path(), "schema_version = 2\n\n[ui]\npage_size = 0\n").unwrap();
+        assert!(format!("{:#}", store.load().unwrap_err()).contains("ui.page_size"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_save_repairs_insecure_existing_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = TempDir::new().unwrap();
+        let store = store_in(&directory);
+        fs::write(store.path(), "obsolete").unwrap();
+        fs::set_permissions(store.path(), fs::Permissions::from_mode(0o644)).unwrap();
+
+        store.save(&UserConfig::default()).unwrap();
+
+        assert_eq!(
+            fs::metadata(store.path()).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+
+    #[test]
     fn rejects_plaintext_sensitive_headers() {
         let profile = ConnectionProfile {
             headers: BTreeMap::from([("authorization".to_string(), "Bearer secret".to_string())]),
@@ -585,6 +882,39 @@ mod tests {
             ..ConnectionProfile::default()
         };
         assert!(profile.validate().is_err());
+    }
+
+    #[test]
+    fn rejects_credentials_and_control_bytes_in_rendered_connection_fields() {
+        let profile = ConnectionProfile {
+            address: "https://operator:secret@temporal.example:7233".to_string(),
+            ..ConnectionProfile::default()
+        };
+        assert!(
+            profile
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("credentials")
+        );
+
+        let profile = ConnectionProfile {
+            web_ui_url: Some("https://operator:secret@ui.example".to_string()),
+            ..ConnectionProfile::default()
+        };
+        assert!(
+            profile
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("credentials")
+        );
+
+        let profile = ConnectionProfile {
+            headers: BTreeMap::from([("x-owner".to_string(), "safe\r\ninjected".to_string())]),
+            ..ConnectionProfile::default()
+        };
+        assert!(profile.validate().unwrap_err().to_string().contains("CR"));
     }
 
     #[test]

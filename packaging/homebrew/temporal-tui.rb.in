@@ -1,0 +1,33 @@
+class TemporalTui < Formula
+  desc "Keyboard-first Temporal dashboard and control plane"
+  homepage "@REPOSITORY@"
+  version "@VERSION@"
+  license "MIT"
+
+  on_macos do
+    if Hardware::CPU.arm?
+      url "@REPOSITORY@/releases/download/v@VERSION@/@MACOS_ARM_ARCHIVE@"
+      sha256 "@MACOS_ARM_SHA@"
+    else
+      url "@REPOSITORY@/releases/download/v@VERSION@/@MACOS_INTEL_ARCHIVE@"
+      sha256 "@MACOS_INTEL_SHA@"
+    end
+  end
+
+  on_linux do
+    url "@REPOSITORY@/releases/download/v@VERSION@/@LINUX_ARCHIVE@"
+    sha256 "@LINUX_SHA@"
+  end
+
+  def install
+    bin.install "temporal-tui"
+    man1.install "man/temporal-tui.1"
+    bash_completion.install "completions/temporal-tui.bash" => "temporal-tui"
+    zsh_completion.install "completions/_temporal-tui"
+    fish_completion.install "completions/temporal-tui.fish"
+  end
+
+  test do
+    assert_match version.to_s, shell_output("#{bin}/temporal-tui --version")
+  end
+end

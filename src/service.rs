@@ -18,7 +18,7 @@ use temporalio_client::{
     Client, ClientOptions, ClientTlsOptions, Connection, ConnectionOptions, TlsOptions,
     WorkflowCancelOptions, WorkflowDescribeOptions, WorkflowExecutionInfo, WorkflowHandle,
     WorkflowTerminateOptions,
-    tonic::{IntoRequest, Request, Status},
+    tonic::{Code, IntoRequest, Request, Status},
 };
 use temporalio_common::{
     UntypedWorkflow,
@@ -47,6 +47,7 @@ use temporalio_common::{
             },
             failure::v1::{Failure, failure::FailureInfo},
             history::v1::{HistoryEvent, history_event::Attributes},
+            namespace::v1::namespace_info::Capabilities as NamespaceCapabilities,
             operatorservice::v1::{
                 AddSearchAttributesRequest, ListSearchAttributesRequest,
                 RemoveSearchAttributesRequest,
@@ -69,10 +70,10 @@ use temporalio_common::{
             workflowservice::v1::{
                 CountWorkflowExecutionsRequest, CreateScheduleRequest, DeleteScheduleRequest,
                 DescribeBatchOperationRequest, DescribeBatchOperationResponse,
-                DescribeNamespaceResponse, DescribeScheduleRequest, DescribeScheduleResponse,
-                DescribeTaskQueueRequest, DescribeTaskQueueResponse,
+                DescribeNamespaceRequest, DescribeNamespaceResponse, DescribeScheduleRequest,
+                DescribeScheduleResponse, DescribeTaskQueueRequest, DescribeTaskQueueResponse,
                 DescribeWorkerDeploymentRequest, DescribeWorkerDeploymentResponse,
-                DescribeWorkerRequest, GetClusterInfoRequest,
+                DescribeWorkerRequest, GetClusterInfoRequest, GetSystemInfoRequest,
                 GetWorkflowExecutionHistoryReverseRequest, ListBatchOperationsRequest,
                 ListNamespacesRequest, ListSchedulesRequest, ListWorkerDeploymentsRequest,
                 ListWorkersRequest, ListWorkflowExecutionsRequest, PatchScheduleRequest,
@@ -93,14 +94,15 @@ use url::Url;
 
 use crate::model::{
     BatchOperationDetails, BatchOperationKind, BatchOperationPage, BatchOperationRequest,
-    BatchOperationSummary, ClusterInfo, DeploymentVersion, DeploymentVersionSummary,
-    FailureSummary, HistoryEventSummary, HistoryPage, NamespaceSummary, PendingActivitySummary,
-    PollerSummary, ScheduleActionResult, ScheduleBackfillRequest, ScheduleCreateRequest,
-    ScheduleDetails, SchedulePage, ScheduleSummary, ScheduleUpdateRequest, SearchAttributeSummary,
-    StructuredField, TaskQueueStats, TaskQueueSummary, TaskQueueType, WorkerDeploymentDetails,
-    WorkerDeploymentPage, WorkerDeploymentSummary, WorkerDetails, WorkerPage, WorkerSlots,
-    WorkerSummary, WorkflowCallResult, WorkflowCount, WorkflowCountGroup, WorkflowDetails,
-    WorkflowKey, WorkflowPage, WorkflowStatus, WorkflowSummary,
+    BatchOperationSummary, Capability, CapabilityAvailability, CapabilitySummary, ClusterInfo,
+    DeploymentVersion, DeploymentVersionSummary, FailureSummary, HistoryEventSummary, HistoryPage,
+    NamespaceSummary, PendingActivitySummary, PollerSummary, ScheduleActionResult,
+    ScheduleBackfillRequest, ScheduleCreateRequest, ScheduleDetails, SchedulePage, ScheduleSummary,
+    ScheduleUpdateRequest, SearchAttributeSummary, ServerCapabilities, StructuredField,
+    TaskQueueStats, TaskQueueSummary, TaskQueueType, WorkerDeploymentDetails, WorkerDeploymentPage,
+    WorkerDeploymentSummary, WorkerDetails, WorkerPage, WorkerSlots, WorkerSummary,
+    WorkflowCallResult, WorkflowCount, WorkflowCountGroup, WorkflowDetails, WorkflowKey,
+    WorkflowPage, WorkflowStatus, WorkflowSummary,
 };
 
 /// TLS settings loaded by the client at startup.
@@ -137,6 +139,9 @@ pub enum ServiceError {
         address: String,
         source: url::ParseError,
     },
+
+    #[error("invalid Temporal connection configuration: {0}")]
+    ConnectionConfig(String),
 
     #[error("could not read {kind} `{path}`: {source}")]
     CredentialFile {
@@ -602,6 +607,11 @@ impl AsyncPayloadVisitor for ReplacePayloads {
 pub trait TemporalService: Send + Sync {
     async fn cluster_info(&self) -> Result<ClusterInfo, ServiceError>;
 
+    async fn server_capabilities(
+        &self,
+        namespace: &str,
+    ) -> Result<ServerCapabilities, ServiceError>;
+
     async fn list_namespaces(&self) -> Result<Vec<NamespaceSummary>, ServiceError>;
 
     async fn list_workflows(
@@ -862,15 +872,16 @@ impl GrpcTemporalService {
     /// Returns an error for an invalid address, unreadable TLS material, invalid
     /// client configuration, or an unreachable Temporal frontend.
     pub async fn connect(config: TemporalConnectionConfig) -> Result<Self, ServiceError> {
-        let payload_codec = config
-            .payload_codec
-            .map(HttpPayloadCodec::new)
-            .transpose()?;
         let address = normalize_address(&config.address, config.tls.is_some());
         let target = Url::parse(&address).map_err(|source| ServiceError::InvalidAddress {
             address: address.clone(),
             source,
         })?;
+        validate_connection_target(&target, &config)?;
+        let payload_codec = config
+            .payload_codec
+            .map(HttpPayloadCodec::new)
+            .transpose()?;
         let mut options = ConnectionOptions::new(target)
             .identity(client_identity())
             .build();
@@ -1110,6 +1121,103 @@ impl TemporalService for GrpcTemporalService {
             persistence_store: response.persistence_store,
             visibility_store: response.visibility_store,
             history_shard_count: response.history_shard_count,
+        })
+    }
+
+    async fn server_capabilities(
+        &self,
+        namespace: &str,
+    ) -> Result<ServerCapabilities, ServiceError> {
+        let mut service = self.connection.workflow_service();
+        let system = service
+            .get_system_info(Request::new(GetSystemInfoRequest::default()))
+            .await
+            .map_err(|source| ServiceError::Rpc {
+                operation: "get system capabilities",
+                source,
+            })?
+            .into_inner();
+        let system_capabilities = system.capabilities;
+        let namespace_capabilities = service
+            .describe_namespace(
+                DescribeNamespaceRequest {
+                    namespace: namespace.to_string(),
+                    id: String::new(),
+                    weak_consistency: true,
+                }
+                .into_request(),
+            )
+            .await
+            .map(|response| {
+                response
+                    .into_inner()
+                    .namespace_info
+                    .and_then(|info| info.capabilities)
+            });
+        drop(service);
+
+        let (
+            schedules_probe,
+            workers_probe,
+            deployments_probe,
+            batches_probe,
+            search_attributes_probe,
+        ) = tokio::join!(
+            self.list_schedules(namespace, "", 1, Vec::new()),
+            self.list_workers(namespace, "", 1, Vec::new()),
+            self.list_worker_deployments(namespace, 1, Vec::new()),
+            self.list_batch_operations(namespace, 1, Vec::new()),
+            self.list_search_attributes(namespace),
+        );
+
+        let features = vec![
+            reported_capability(
+                Capability::VisibilityAggregations,
+                system_capabilities
+                    .as_ref()
+                    .map(|capabilities| capabilities.count_group_by_execution_status),
+                "GetSystemInfo",
+            ),
+            reported_capability(
+                Capability::EncodedFailureAttributes,
+                system_capabilities
+                    .as_ref()
+                    .map(|capabilities| capabilities.encoded_failure_attributes),
+                "GetSystemInfo",
+            ),
+            namespace_capability(
+                Capability::WorkflowUpdate,
+                &namespace_capabilities,
+                |capabilities| capabilities.sync_update || capabilities.async_update,
+            ),
+            namespace_capability(
+                Capability::WorkflowPause,
+                &namespace_capabilities,
+                |capabilities| capabilities.workflow_pause,
+            ),
+            reported_and_probed_capability(
+                Capability::Schedules,
+                system_capabilities
+                    .as_ref()
+                    .map(|capabilities| capabilities.supports_schedules),
+                &schedules_probe,
+                "GetSystemInfo",
+            ),
+            namespace_and_probed_capability(
+                Capability::WorkerHeartbeats,
+                &namespace_capabilities,
+                |capabilities| capabilities.worker_heartbeats,
+                &workers_probe,
+            ),
+            probed_capability(Capability::WorkerDeployments, &deployments_probe),
+            probed_capability(Capability::BatchOperations, &batches_probe),
+            probed_capability(Capability::SearchAttributes, &search_attributes_probe),
+        ];
+
+        Ok(ServerCapabilities {
+            server_version: system.server_version,
+            namespace: namespace.to_string(),
+            features,
         })
     }
 
@@ -3118,6 +3226,145 @@ fn validate_batch_operation_request(request: &BatchOperationRequest) -> Result<(
     Ok(())
 }
 
+fn reported_capability(
+    capability: Capability,
+    supported: Option<bool>,
+    source: &str,
+) -> CapabilitySummary {
+    match supported {
+        Some(true) => capability_summary(
+            capability,
+            CapabilityAvailability::Available,
+            format!("{source} reported support"),
+        ),
+        Some(false) => capability_summary(
+            capability,
+            CapabilityAvailability::Unavailable,
+            format!("{source} reported the feature disabled"),
+        ),
+        None => capability_summary(
+            capability,
+            CapabilityAvailability::Unknown,
+            format!("{source} did not include this capability"),
+        ),
+    }
+}
+
+fn reported_and_probed_capability<T>(
+    capability: Capability,
+    supported: Option<bool>,
+    probe: &Result<T, ServiceError>,
+    source: &str,
+) -> CapabilitySummary {
+    if supported == Some(false) {
+        return reported_capability(capability, supported, source);
+    }
+    let mut summary = probed_capability(capability, probe);
+    let report = if supported == Some(true) {
+        format!("{source} reported support")
+    } else {
+        format!("{source} omitted the capability")
+    };
+    summary.detail = format!("{report}; {}", summary.detail);
+    summary
+}
+
+fn namespace_capability<Getter>(
+    capability: Capability,
+    namespace_capabilities: &Result<Option<NamespaceCapabilities>, Status>,
+    getter: Getter,
+) -> CapabilitySummary
+where
+    Getter: Fn(&NamespaceCapabilities) -> bool,
+{
+    match namespace_capabilities {
+        Ok(Some(capabilities)) => {
+            reported_capability(capability, Some(getter(capabilities)), "DescribeNamespace")
+        }
+        Ok(None) => reported_capability(capability, None, "DescribeNamespace"),
+        Err(status) => status_capability(capability, status, "DescribeNamespace capability lookup"),
+    }
+}
+
+fn namespace_and_probed_capability<T, Getter>(
+    capability: Capability,
+    namespace_capabilities: &Result<Option<NamespaceCapabilities>, Status>,
+    getter: Getter,
+    probe: &Result<T, ServiceError>,
+) -> CapabilitySummary
+where
+    Getter: Fn(&NamespaceCapabilities) -> bool,
+{
+    match namespace_capabilities {
+        Ok(Some(capabilities)) if !getter(capabilities) => {
+            reported_capability(capability, Some(false), "DescribeNamespace")
+        }
+        Ok(Some(_)) => {
+            reported_and_probed_capability(capability, Some(true), probe, "DescribeNamespace")
+        }
+        Ok(None) => reported_and_probed_capability(capability, None, probe, "DescribeNamespace"),
+        Err(status)
+            if matches!(
+                status.code(),
+                Code::PermissionDenied | Code::Unauthenticated
+            ) =>
+        {
+            status_capability(capability, status, "DescribeNamespace capability lookup")
+        }
+        Err(_) => probed_capability(capability, probe),
+    }
+}
+
+fn probed_capability<T>(
+    capability: Capability,
+    probe: &Result<T, ServiceError>,
+) -> CapabilitySummary {
+    match probe {
+        Ok(_) => capability_summary(
+            capability,
+            CapabilityAvailability::Available,
+            "read-only endpoint probe succeeded",
+        ),
+        Err(ServiceError::Rpc { source, .. }) => {
+            status_capability(capability, source, "read-only endpoint probe")
+        }
+        Err(error) => capability_summary(
+            capability,
+            CapabilityAvailability::Unknown,
+            bounded_detail(&format!("read-only endpoint probe failed: {error}")),
+        ),
+    }
+}
+
+fn status_capability(capability: Capability, status: &Status, context: &str) -> CapabilitySummary {
+    let availability = match status.code() {
+        Code::Unimplemented => CapabilityAvailability::Unavailable,
+        Code::PermissionDenied | Code::Unauthenticated => CapabilityAvailability::Restricted,
+        _ => CapabilityAvailability::Unknown,
+    };
+    capability_summary(
+        capability,
+        availability,
+        bounded_detail(&format!("{context} returned {}", status.code())),
+    )
+}
+
+fn capability_summary(
+    capability: Capability,
+    availability: CapabilityAvailability,
+    detail: impl Into<String>,
+) -> CapabilitySummary {
+    CapabilitySummary {
+        capability,
+        availability,
+        detail: detail.into(),
+    }
+}
+
+fn bounded_detail(detail: &str) -> String {
+    detail.chars().take(160).collect()
+}
+
 fn deployment_version(version: &ProtoDeploymentVersion) -> DeploymentVersion {
     DeploymentVersion {
         deployment_name: version.deployment_name.clone(),
@@ -3519,6 +3766,61 @@ fn normalize_address(address: &str, tls: bool) -> String {
     }
 }
 
+fn validate_connection_target(
+    target: &Url,
+    config: &TemporalConnectionConfig,
+) -> Result<(), ServiceError> {
+    if !matches!(target.scheme(), "http" | "https") {
+        return Err(ServiceError::ConnectionConfig(
+            "address scheme must be http or https".to_string(),
+        ));
+    }
+    if !target.username().is_empty() || target.password().is_some() {
+        return Err(ServiceError::ConnectionConfig(
+            "address must not contain credentials".to_string(),
+        ));
+    }
+    if target.path() != "/" || target.query().is_some() || target.fragment().is_some() {
+        return Err(ServiceError::ConnectionConfig(
+            "address must not contain a path, query, or fragment".to_string(),
+        ));
+    }
+    if config
+        .api_key
+        .as_deref()
+        .is_some_and(|value| value.is_empty() || contains_invalid_metadata_bytes(value))
+    {
+        return Err(ServiceError::ConnectionConfig(
+            "API key is empty or contains invalid bytes".to_string(),
+        ));
+    }
+    for (name, value) in &config.headers {
+        HeaderName::from_bytes(name.as_bytes()).map_err(|_| {
+            ServiceError::ConnectionConfig(format!("gRPC header `{name}` has an invalid name"))
+        })?;
+        HeaderValue::from_str(value).map_err(|_| {
+            ServiceError::ConnectionConfig(format!("gRPC header `{name}` has an invalid value"))
+        })?;
+    }
+    if let Some(server_name) = config
+        .tls
+        .as_ref()
+        .and_then(|tls| tls.server_name.as_deref())
+        && (server_name.is_empty() || server_name.chars().any(char::is_control))
+    {
+        return Err(ServiceError::ConnectionConfig(
+            "TLS server name is empty or contains control characters".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn contains_invalid_metadata_bytes(value: &str) -> bool {
+    value
+        .bytes()
+        .any(|byte| matches!(byte, b'\0' | b'\r' | b'\n'))
+}
+
 fn client_identity() -> String {
     let host = std::env::var("HOSTNAME")
         .or_else(|_| std::env::var("COMPUTERNAME"))
@@ -3607,6 +3909,27 @@ mod tests {
             normalize_address("http://cloud.example:7233", true),
             "https://cloud.example:7233"
         );
+    }
+
+    #[test]
+    fn rejects_credentials_paths_and_control_bytes_in_connections() {
+        let base = TemporalConnectionConfig {
+            address: "https://temporal.example:7233".to_string(),
+            api_key: None,
+            headers: HashMap::new(),
+            tls: None,
+            payload_codec: None,
+        };
+
+        let target = Url::parse("https://operator:secret@temporal.example:7233").unwrap();
+        assert!(validate_connection_target(&target, &base).is_err());
+        let target = Url::parse("https://temporal.example:7233/unexpected").unwrap();
+        assert!(validate_connection_target(&target, &base).is_err());
+
+        let mut invalid_api_key = base.clone();
+        invalid_api_key.api_key = Some("secret\r\ninjected".to_string());
+        let target = Url::parse(&invalid_api_key.address).unwrap();
+        assert!(validate_connection_target(&target, &invalid_api_key).is_err());
     }
 
     #[test]
@@ -3967,6 +4290,42 @@ mod tests {
             })
             .is_err()
         );
+    }
+
+    #[test]
+    fn capability_probes_distinguish_absence_permissions_and_transient_unknowns() {
+        let available = probed_capability(Capability::BatchOperations, &Ok::<_, ServiceError>(()));
+        assert_eq!(available.availability, CapabilityAvailability::Available);
+
+        let unavailable = probed_capability::<()>(
+            Capability::WorkerDeployments,
+            &Err(ServiceError::Rpc {
+                operation: "probe",
+                source: Status::unimplemented("not supported"),
+            }),
+        );
+        assert_eq!(
+            unavailable.availability,
+            CapabilityAvailability::Unavailable
+        );
+
+        let restricted = probed_capability::<()>(
+            Capability::SearchAttributes,
+            &Err(ServiceError::Rpc {
+                operation: "probe",
+                source: Status::permission_denied("not authorized"),
+            }),
+        );
+        assert_eq!(restricted.availability, CapabilityAvailability::Restricted);
+
+        let unknown = probed_capability::<()>(
+            Capability::Schedules,
+            &Err(ServiceError::Rpc {
+                operation: "probe",
+                source: Status::unavailable("temporary outage"),
+            }),
+        );
+        assert_eq!(unknown.availability, CapabilityAvailability::Unknown);
     }
 
     #[test]

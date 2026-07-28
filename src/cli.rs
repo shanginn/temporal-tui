@@ -406,10 +406,16 @@ impl Cli {
                 profile_name,
                 namespace: self.namespace.clone().unwrap_or(profile_namespace),
                 query: self.query.clone().unwrap_or_default(),
-                page_size: self.page_size.unwrap_or(200),
-                refresh_interval: Duration::from_secs(self.refresh_seconds.unwrap_or(5)),
-                auto_refresh: !self.no_auto_refresh,
-                color: !self.no_color,
+                page_size: self.page_size.unwrap_or(config.ui.page_size),
+                refresh_interval: Duration::from_secs(
+                    self.refresh_seconds.unwrap_or(config.ui.refresh_seconds),
+                ),
+                auto_refresh: config.ui.auto_refresh && !self.no_auto_refresh,
+                color: color_enabled(
+                    config.ui.color,
+                    self.no_color,
+                    std::env::var_os("NO_COLOR").is_some(),
+                ),
                 read_only: self.read_only || profile_read_only,
                 force_read_only: self.read_only,
                 codec_enabled,
@@ -656,6 +662,12 @@ fn parse_header(value: &str) -> Result<(String, String), String> {
     if key.is_empty() || value.is_empty() {
         return Err("header key and value must not be empty".to_string());
     }
+    if value
+        .bytes()
+        .any(|byte| matches!(byte, b'\0' | b'\r' | b'\n'))
+    {
+        return Err("header value must not contain NUL, CR, or LF bytes".to_string());
+    }
     if key.ends_with("-bin")
         || !key
             .bytes()
@@ -663,7 +675,20 @@ fn parse_header(value: &str) -> Result<(String, String), String> {
     {
         return Err("header key must be lowercase ASCII and must not end in -bin".to_string());
     }
+    if ["authorization", "cookie", "token", "secret", "api-key"]
+        .iter()
+        .any(|needle| key.contains(needle))
+    {
+        return Err(
+            "sensitive headers must use an API-key, Codec auth, or profile secret option"
+                .to_string(),
+        );
+    }
     Ok((key, value))
+}
+
+const fn color_enabled(preference: bool, cli_disabled: bool, no_color_env: bool) -> bool {
+    preference && !cli_disabled && !no_color_env
 }
 
 fn parse_page_size(value: &str) -> Result<usize, String> {
@@ -729,6 +754,16 @@ mod tests {
         );
         assert!(parse_header("Bad Header=value").is_err());
         assert!(parse_header("payload-bin=value").is_err());
+        assert!(parse_header("authorization=Bearer secret").is_err());
+        assert!(parse_header("x-owner=safe\r\ninjected").is_err());
+    }
+
+    #[test]
+    fn color_preference_honors_cli_and_no_color_environment() {
+        assert!(color_enabled(true, false, false));
+        assert!(!color_enabled(false, false, false));
+        assert!(!color_enabled(true, true, false));
+        assert!(!color_enabled(true, false, true));
     }
 
     #[test]
@@ -760,6 +795,40 @@ mod tests {
         assert_eq!(launch.app.profiles[0].name, "dev");
         assert_eq!(launch.app.profiles[0].namespace, "payments");
         assert!(launch.app.profiles[0].is_default);
+    }
+
+    #[test]
+    fn ui_preferences_are_defaults_and_cli_flags_only_tighten_them() {
+        let (_directory, store, mut config) = empty_store();
+        config.ui.page_size = 321;
+        config.ui.refresh_seconds = 17;
+        config.ui.auto_refresh = false;
+        config.ui.color = false;
+
+        let cli = Cli::try_parse_from(["temporal-tui"]).unwrap();
+        let launch = cli.launch_config(&store, &config).unwrap();
+        assert_eq!(launch.app.page_size, 321);
+        assert_eq!(launch.app.refresh_interval, Duration::from_secs(17));
+        assert!(!launch.app.auto_refresh);
+        assert!(!launch.app.color);
+
+        config.ui.auto_refresh = true;
+        config.ui.color = true;
+        let cli = Cli::try_parse_from([
+            "temporal-tui",
+            "--page-size",
+            "123",
+            "--refresh-seconds",
+            "9",
+            "--no-auto-refresh",
+            "--no-color",
+        ])
+        .unwrap();
+        let launch = cli.launch_config(&store, &config).unwrap();
+        assert_eq!(launch.app.page_size, 123);
+        assert_eq!(launch.app.refresh_interval, Duration::from_secs(9));
+        assert!(!launch.app.auto_refresh);
+        assert!(!launch.app.color);
     }
 
     #[test]

@@ -50,21 +50,34 @@ the disposable-server contract both pass.
 - Set Worker Deployment current/ramping versions, ramp percentages, and
   promotion state with drainage-aware warnings.
 
-## In progress
-
 ### v1.0 — production release
 
-- Negotiate and display server capabilities; degrade unavailable APIs without
-  losing the rest of the dashboard.
-- Exercise supported Temporal Server versions in compatibility contracts and
-  document the tested matrix.
-- Version and migrate the config schema atomically, with downgrade-safe backup.
-- Add Linux, macOS, and Windows release artifacts, checksums, SBOM/provenance,
-  shell completions, manpage, and package-manager installation metadata.
-- Add CI for formatting, Clippy, tests, live contracts, release builds, and
-  dependency/security/license policy.
-- Complete threat model, operations guide, troubleshooting guide, accessibility
-  pass, and clean-machine install/upgrade/uninstall tests.
+- Negotiated capability evidence and independent degradation for unavailable,
+  restricted, and transiently unknown APIs.
+- Disposable read-only contracts for Server 1.29/1.30/1.31 plus the complete
+  1.31 mutation contract.
+- Atomic schema-1 to schema-2 migration with byte-identical private backup and
+  persisted UI defaults.
+- Linux, macOS ARM/Intel, and Windows release archives, completions, manpage,
+  Homebrew/Scoop metadata, SHA-256, CycloneDX SBOM, and provenance.
+- Cross-platform quality/live/compatibility CI and weekly
+  advisory/license/source policy.
+- Threat model, operations, troubleshooting, accessibility, and automated
+  clean install/upgrade/uninstall verification.
+
+## Next
+
+### v1.1 — operator ergonomics
+
+- User-defined column layouts and compact saved dashboard presets.
+- Optional structured tracing export with explicit redaction policy.
+- Additional Temporal Cloud authorization test fixtures.
+
+### v1.2 — incident workflows
+
+- Cross-view bookmarks for Workflows, Task Queues, Deployments, and Batch jobs.
+- Compare two Workflow histories or Worker Deployment routing snapshots.
+- Signed diagnostic bundles with operator-supplied incident metadata.
 
 ## Release invariants
 

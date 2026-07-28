@@ -12,6 +12,9 @@ required at runtime.
 - Inspect full paginated history, failure causes and stacks, payloads, memo,
   Search Attributes, pending Activities, and every run in a Workflow chain.
 - Discover and switch namespaces without reconnecting.
+- Negotiate server and namespace capabilities from reported flags and
+  non-mutating probes. Press `K` for evidence; unavailable or restricted APIs
+  degrade only their own surfaces.
 - Diagnose Workflow and Activity Task Queues with backlog size and age,
   add/dispatch rates, pollers, effective rate limits, and current/ramping
   Worker Deployment routing. Queue names are discovered from Workflows and
@@ -59,6 +62,8 @@ required at runtime.
   blocking, and one bounded transient-transport retry are enforced.
 - Restore raw mode, the cursor, and the alternate screen on normal and error
   exits.
+- Strip terminal control sequences and Unicode bidi overrides from every final
+  rendered cell.
 
 Cancellation and termination require typing the exact Workflow ID and are
 unavailable in read-only mode.
@@ -69,6 +74,13 @@ Mutation commands retain both the workflow ID and run ID selected when the
 confirmation opened, so a refresh cannot redirect an action to a different run.
 
 The staged development and release plan is tracked in [ROADMAP.md](ROADMAP.md).
+Production references:
+[installation](docs/INSTALLATION.md),
+[compatibility](docs/COMPATIBILITY.md),
+[operations](docs/OPERATIONS.md),
+[troubleshooting](docs/TROUBLESHOOTING.md),
+[accessibility](docs/ACCESSIBILITY.md), and
+[threat model](docs/THREAT_MODEL.md).
 
 ## Build
 
@@ -84,7 +96,14 @@ The release binary is `target/release/temporal-tui`.
 On macOS, the Xcode Command Line Tools must be installed and their license
 accepted so Rust can invoke the system SDK and linker.
 
-Install directly from GitHub:
+Install the latest release with Homebrew:
+
+```sh
+brew install --formula \
+  https://github.com/shanginn/temporal-tui/releases/latest/download/temporal-tui.rb
+```
+
+Or build directly from GitHub:
 
 ```sh
 cargo install --locked --git https://github.com/shanginn/temporal-tui
@@ -180,6 +199,20 @@ temporal-tui profile create encrypted-cloud \
 Codec authorization is resolved only at runtime. It is not written to the
 profile or diagnostic exports.
 
+Schema-2 config accepts persisted UI defaults:
+
+```toml
+[ui]
+page_size = 200
+refresh_seconds = 5
+auto_refresh = true
+color = true
+```
+
+CLI flags override numeric defaults and can disable auto-refresh or color.
+`NO_COLOR` is honored. Schema-1 files migrate atomically after a byte-identical
+`config.toml.v1.bak` is written.
+
 ## Keyboard controls
 
 | Key | Action |
@@ -194,6 +227,7 @@ profile or diagnostic exports.
 | `n` | Switch namespace |
 | `P` | Switch configured connection profile |
 | `A` | Inspect and manage namespace Search Attributes |
+| `K` | Inspect negotiated server/namespace capabilities |
 | `[` / `]` | Previous / next page in the active paginated view |
 | `r` | Refresh now |
 | `a` | Toggle automatic refresh |
@@ -239,6 +273,12 @@ cargo test --locked --test live_temporal -- --ignored --nocapture
 
 The installer downloads the pinned CLI release into `.tools/bin`, verifies the
 published SHA-256 checksum, and does not modify the system installation.
+
+Run the read-only Temporal Server 1.29/1.30/1.31 matrix:
+
+```sh
+scripts/compatibility.sh
+```
 
 ## Design
 

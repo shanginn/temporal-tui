@@ -117,6 +117,86 @@ pub struct SearchAttributeSummary {
     pub custom: bool,
 }
 
+/// A dashboard feature whose availability is negotiated with the connected server.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Capability {
+    VisibilityAggregations,
+    EncodedFailureAttributes,
+    WorkflowUpdate,
+    WorkflowPause,
+    Schedules,
+    WorkerHeartbeats,
+    WorkerDeployments,
+    BatchOperations,
+    SearchAttributes,
+}
+
+impl Capability {
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::VisibilityAggregations => "Visibility GROUP BY",
+            Self::EncodedFailureAttributes => "Encoded failure attributes",
+            Self::WorkflowUpdate => "Workflow Update",
+            Self::WorkflowPause => "Workflow pause",
+            Self::Schedules => "Schedules",
+            Self::WorkerHeartbeats => "Worker heartbeats",
+            Self::WorkerDeployments => "Worker Deployments",
+            Self::BatchOperations => "Batch Operations",
+            Self::SearchAttributes => "Search Attribute registry",
+        }
+    }
+}
+
+/// Negotiated feature state. `Unknown` remains optimistic so transient probe
+/// failures do not disable an otherwise usable dashboard.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CapabilityAvailability {
+    Available,
+    Unavailable,
+    Restricted,
+    Unknown,
+}
+
+impl CapabilityAvailability {
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Available => "AVAILABLE",
+            Self::Unavailable => "UNAVAILABLE",
+            Self::Restricted => "RESTRICTED",
+            Self::Unknown => "UNKNOWN",
+        }
+    }
+}
+
+/// One negotiated server/namespace capability.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CapabilitySummary {
+    pub capability: Capability,
+    pub availability: CapabilityAvailability,
+    pub detail: String,
+}
+
+/// Complete capability snapshot for the active server and namespace.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ServerCapabilities {
+    pub server_version: String,
+    pub namespace: String,
+    pub features: Vec<CapabilitySummary>,
+}
+
+impl ServerCapabilities {
+    #[must_use]
+    pub fn get(&self, capability: Capability) -> Option<&CapabilitySummary> {
+        self.features
+            .iter()
+            .find(|summary| summary.capability == capability)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BatchOperationKind {

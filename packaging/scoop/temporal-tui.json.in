@@ -1,0 +1,26 @@
+{
+  "version": "@VERSION@",
+  "description": "Keyboard-first Temporal dashboard and control plane",
+  "homepage": "@REPOSITORY@",
+  "license": {
+    "identifier": "MIT",
+    "url": "@REPOSITORY@/blob/master/LICENSE"
+  },
+  "architecture": {
+    "64bit": {
+      "url": "@REPOSITORY@/releases/download/v@VERSION@/@WINDOWS_ARCHIVE@",
+      "hash": "@WINDOWS_SHA@"
+    }
+  },
+  "bin": "temporal-tui.exe",
+  "checkver": {
+    "github": "@REPOSITORY@"
+  },
+  "autoupdate": {
+    "architecture": {
+      "64bit": {
+        "url": "@REPOSITORY@/releases/download/v$version/temporal-tui-v$version-x86_64-pc-windows-msvc.zip"
+      }
+    }
+  }
+}

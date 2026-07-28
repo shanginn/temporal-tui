@@ -1,0 +1,94 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH temporal-tui 1  "temporal-tui 1.0.0"
+.SH NAME
+temporal\-tui \- A fast terminal dashboard and control plane for Temporal
+.SH SYNOPSIS
+\fBtemporal\-tui\fR [\fB\-\-config\fR] [\fB\-\-profile\fR] [\fB\-\-address\fR] [\fB\-n\fR|\fB\-\-namespace\fR] [\fB\-\-api\-key\fR] [\fB\-\-tls\fR] [\fB\-\-tls\-ca\fR] [\fB\-\-tls\-cert\fR] [\fB\-\-tls\-key\fR] [\fB\-\-tls\-server\-name\fR] [\fB\-\-header\fR] [\fB\-\-codec\-endpoint\fR] [\fB\-\-codec\-header\fR] [\fB\-\-codec\-auth\fR] [\fB\-q\fR|\fB\-\-query\fR] [\fB\-\-page\-size\fR] [\fB\-\-refresh\-seconds\fR] [\fB\-\-no\-auto\-refresh\fR] [\fB\-\-no\-color\fR] [\fB\-\-read\-only\fR] [\fB\-\-web\-ui\-url\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] [\fIsubcommands\fR]
+.SH DESCRIPTION
+A fast terminal dashboard and control plane for Temporal
+.SH OPTIONS
+.TP
+\fB\-\-config\fR \fI<CONFIG>\fR
+Alternate config file. Defaults to the platform user config directory
+.TP
+\fB\-\-profile\fR \fI<PROFILE>\fR
+Named connection profile
+.TP
+\fB\-\-address\fR \fI<ADDRESS>\fR
+Temporal frontend address. A scheme is optional
+.TP
+\fB\-n\fR, \fB\-\-namespace\fR \fI<NAMESPACE>\fR
+Namespace selected at startup
+.TP
+\fB\-\-api\-key\fR \fI<API_KEY>\fR
+Temporal Cloud API key. Prefer `profile set\-api\-key`
+.TP
+\fB\-\-tls\fR
+Enable TLS even when the address does not use an https scheme
+.TP
+\fB\-\-tls\-ca\fR \fI<TLS_CA>\fR
+PEM\-encoded server CA certificate
+.TP
+\fB\-\-tls\-cert\fR \fI<TLS_CERT>\fR
+PEM\-encoded mTLS client certificate
+.TP
+\fB\-\-tls\-key\fR \fI<TLS_KEY>\fR
+PEM\-encoded mTLS client private key
+.TP
+\fB\-\-tls\-server\-name\fR \fI<TLS_SERVER_NAME>\fR
+TLS server name override
+.TP
+\fB\-\-header\fR \fI<HEADERS>\fR
+Additional gRPC header in KEY=VALUE form. May be repeated
+.TP
+\fB\-\-codec\-endpoint\fR \fI<CODEC_ENDPOINT>\fR
+Temporal Codec Server base URL; `{namespace}` is expanded in its path
+.TP
+\fB\-\-codec\-header\fR \fI<CODEC_HEADERS>\fR
+Codec Server HTTP header in KEY=VALUE form. May be repeated
+.TP
+\fB\-\-codec\-auth\fR \fI<CODEC_AUTH>\fR
+Codec Server Authorization header. Prefer the environment variable
+.TP
+\fB\-q\fR, \fB\-\-query\fR \fI<QUERY>\fR
+Initial Temporal visibility query
+.TP
+\fB\-\-page\-size\fR \fI<PAGE_SIZE>\fR
+Workflows loaded per cursor page
+.TP
+\fB\-\-refresh\-seconds\fR \fI<REFRESH_SECONDS>\fR
+Automatic refresh interval in seconds
+.TP
+\fB\-\-no\-auto\-refresh\fR
+Start with automatic refresh disabled
+.TP
+\fB\-\-no\-color\fR
+Disable colors while retaining text status labels
+.TP
+\fB\-\-read\-only\fR
+Block every Temporal mutation, including signals
+.TP
+\fB\-\-web\-ui\-url\fR \fI<WEB_UI_URL>\fR
+Base URL of Temporal Web UI
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help
+.TP
+\fB\-V\fR, \fB\-\-version\fR
+Print version
+.SH SUBCOMMANDS
+.TP
+temporal\-tui\-profile(1)
+Manage connection profiles
+.TP
+temporal\-tui\-filter(1)
+Manage saved visibility queries
+.TP
+temporal\-tui\-config\-path(1)
+Print the active config path
+.TP
+temporal\-tui\-help(1)
+Print this message or the help of the given subcommand(s)
+.SH VERSION
+v1.0.0

@@ -4,6 +4,7 @@ set -euo pipefail
 version="${TEMPORAL_CLI_VERSION:-1.8.1}"
 project_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 tool_dir="${project_root}/.tools/bin"
+output="${TEMPORAL_CLI_OUTPUT:-${tool_dir}/temporal}"
 temporary_dir="$(mktemp -d)"
 trap 'rm -rf "${temporary_dir}"' EXIT
 
@@ -50,6 +51,6 @@ if [[ "${actual_checksum}" != "${expected_checksum}" ]]; then
 fi
 
 tar -xzf "${temporary_dir}/${archive}" -C "${temporary_dir}"
-mkdir -p "${tool_dir}"
-install -m 0755 "${temporary_dir}/temporal" "${tool_dir}/temporal"
-"${tool_dir}/temporal" --version
+mkdir -p "$(dirname "${output}")"
+install -m 0755 "${temporary_dir}/temporal" "${output}"
+"${output}" --version
