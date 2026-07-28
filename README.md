@@ -101,8 +101,7 @@ accepted so Rust can invoke the system SDK and linker.
 Install the latest release with Homebrew:
 
 ```sh
-brew install --formula \
-  https://github.com/shanginn/temporal-tui/releases/latest/download/temporal-tui.rb
+brew install shanginn/temporal-tui/temporal-tui
 ```
 
 Or build directly from GitHub:

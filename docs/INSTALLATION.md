@@ -6,7 +6,7 @@ Download the target archive and `SHA256SUMS` from the matching GitHub Release:
 
 ```sh
 shasum -a 256 -c SHA256SUMS
-gh attestation verify temporal-tui-v1.0.0-aarch64-apple-darwin.tgz \
+gh attestation verify temporal-tui-v1.0.1-aarch64-apple-darwin.tgz \
   --repo shanginn/temporal-tui
 ```
 
@@ -18,9 +18,12 @@ manpage, and Bash, Zsh, Fish, PowerShell, and Elvish completions.
 Homebrew on macOS/Linux:
 
 ```sh
-brew install --formula \
-  https://github.com/shanginn/temporal-tui/releases/latest/download/temporal-tui.rb
+brew install shanginn/temporal-tui/temporal-tui
 ```
+
+The fully qualified name trusts only this formula and automatically adds the
+[`shanginn/homebrew-temporal-tui`](https://github.com/shanginn/homebrew-temporal-tui)
+tap.
 
 Scoop on 64-bit Windows:
 
@@ -32,7 +35,7 @@ Cargo from source:
 
 ```sh
 cargo install --locked --git https://github.com/shanginn/temporal-tui \
-  --tag v1.0.0
+  --tag v1.0.1
 ```
 
 The manifest includes `cargo-binstall` metadata for release archives.

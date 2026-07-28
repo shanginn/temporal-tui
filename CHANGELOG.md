@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.0.1 — 2026-07-28
+
+- Publish the official `shanginn/homebrew-temporal-tui` tap and replace the
+  direct formula URL, which current Homebrew no longer accepts.
+- Retain the complete v1.0 runtime, compatibility, packaging, security, and
+  provenance contract unchanged.
+
 ## 1.0.0 — 2026-07-28
 
 - Capability negotiation with independent unavailable, restricted, and
