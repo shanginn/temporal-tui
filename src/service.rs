@@ -27,29 +27,49 @@ use temporalio_common::{
     protos::{
         proto_ts_to_system_time,
         temporal::api::{
-            common::v1::{Payload, Payloads, WorkflowExecution as ProtoWorkflowExecution},
+            common::v1::{
+                Payload, Payloads, WorkflowExecution as ProtoWorkflowExecution, WorkflowType,
+            },
             deployment::v1::{
                 WorkerDeploymentInfo as ProtoWorkerDeploymentInfo,
                 WorkerDeploymentVersion as ProtoDeploymentVersion,
             },
             enums::v1::{
-                EventType, PendingActivityState, RoutingConfigUpdateState,
-                TaskQueueType as ProtoTaskQueueType, VersionDrainageStatus,
-                WorkerDeploymentVersionStatus, WorkerStatus, WorkflowExecutionStatus,
+                EventType, PendingActivityState, RoutingConfigUpdateState, ScheduleOverlapPolicy,
+                TaskQueueType as ProtoTaskQueueType, UpdateWorkflowExecutionLifecycleStage,
+                VersionDrainageStatus, WorkerDeploymentVersionStatus, WorkerStatus,
+                WorkflowExecutionStatus,
             },
             failure::v1::{Failure, failure::FailureInfo},
             history::v1::{HistoryEvent, history_event::Attributes},
+            query::v1::WorkflowQuery,
+            schedule::v1::{
+                BackfillRequest as ProtoScheduleBackfillRequest, CalendarSpec, IntervalSpec, Range,
+                Schedule, ScheduleAction, ScheduleActionResult as ProtoScheduleActionResult,
+                ScheduleListEntry, SchedulePatch, ScheduleSpec, ScheduleState,
+                StructuredCalendarSpec, TriggerImmediatelyRequest, schedule_action,
+            },
             taskqueue::v1::{TaskQueue as ProtoTaskQueue, TaskQueueStats as ProtoTaskQueueStats},
+            update::v1::{
+                Input as UpdateInput, Meta as UpdateMeta, Outcome as UpdateOutcome,
+                Request as UpdateRequest, WaitPolicy, outcome,
+            },
             worker::v1::{WorkerHeartbeat, WorkerListInfo, WorkerSlotsInfo},
-            workflow::v1::PendingActivityInfo,
             workflow::v1::WorkflowExecutionInfo as ProtoWorkflowExecutionInfo,
+            workflow::v1::{NewWorkflowExecutionInfo, PendingActivityInfo},
             workflowservice::v1::{
-                CountWorkflowExecutionsRequest, DescribeNamespaceResponse,
+                CountWorkflowExecutionsRequest, CreateScheduleRequest, DeleteScheduleRequest,
+                DescribeNamespaceResponse, DescribeScheduleRequest, DescribeScheduleResponse,
                 DescribeTaskQueueRequest, DescribeTaskQueueResponse,
                 DescribeWorkerDeploymentRequest, DescribeWorkerRequest, GetClusterInfoRequest,
                 GetWorkflowExecutionHistoryReverseRequest, ListNamespacesRequest,
-                ListWorkerDeploymentsRequest, ListWorkersRequest, ListWorkflowExecutionsRequest,
-                SignalWorkflowExecutionRequest, list_worker_deployments_response,
+                ListSchedulesRequest, ListWorkerDeploymentsRequest, ListWorkersRequest,
+                ListWorkflowExecutionsRequest, PatchScheduleRequest, PauseWorkflowExecutionRequest,
+                PollWorkflowExecutionUpdateRequest, QueryWorkflowRequest,
+                ResetWorkflowExecutionRequest, SignalWorkflowExecutionRequest,
+                UnpauseWorkflowExecutionRequest,
+                UpdateScheduleRequest as ProtoUpdateScheduleRequest,
+                UpdateWorkflowExecutionRequest, list_worker_deployments_response,
             },
         },
     },
@@ -59,11 +79,12 @@ use url::Url;
 
 use crate::model::{
     ClusterInfo, DeploymentVersion, DeploymentVersionSummary, FailureSummary, HistoryEventSummary,
-    HistoryPage, NamespaceSummary, PendingActivitySummary, PollerSummary, StructuredField,
-    TaskQueueStats, TaskQueueSummary, TaskQueueType, WorkerDeploymentDetails, WorkerDeploymentPage,
-    WorkerDeploymentSummary, WorkerDetails, WorkerPage, WorkerSlots, WorkerSummary, WorkflowCount,
-    WorkflowCountGroup, WorkflowDetails, WorkflowKey, WorkflowPage, WorkflowStatus,
-    WorkflowSummary,
+    HistoryPage, NamespaceSummary, PendingActivitySummary, PollerSummary, ScheduleActionResult,
+    ScheduleBackfillRequest, ScheduleCreateRequest, ScheduleDetails, SchedulePage, ScheduleSummary,
+    ScheduleUpdateRequest, StructuredField, TaskQueueStats, TaskQueueSummary, TaskQueueType,
+    WorkerDeploymentDetails, WorkerDeploymentPage, WorkerDeploymentSummary, WorkerDetails,
+    WorkerPage, WorkerSlots, WorkerSummary, WorkflowCallResult, WorkflowCount, WorkflowCountGroup,
+    WorkflowDetails, WorkflowKey, WorkflowPage, WorkflowStatus, WorkflowSummary,
 };
 
 /// TLS settings loaded by the client at startup.
@@ -265,16 +286,32 @@ impl HttpPayloadCodec {
         }
         let namespace_header = HeaderValue::from_str(namespace)
             .map_err(|_| codec_error(operation, "namespace contains invalid header bytes"))?;
-        let response = self
-            .client
-            .post(self.url(namespace, operation)?)
-            .headers(self.headers.clone())
-            .header("x-namespace", namespace_header)
-            .header(CONTENT_TYPE, "application/json")
-            .body(body)
-            .send()
-            .await
-            .map_err(|error| codec_error(operation, format!("request failed: {error}")))?;
+        let url = self.url(namespace, operation)?;
+        let mut attempt = 0_u8;
+        let response = loop {
+            let result = self
+                .client
+                .post(url.clone())
+                .headers(self.headers.clone())
+                .header("x-namespace", namespace_header.clone())
+                .header(CONTENT_TYPE, "application/json")
+                .body(body.clone())
+                .send()
+                .await;
+            match result {
+                Ok(response) => break response,
+                Err(_) if attempt == 0 => {
+                    attempt += 1;
+                    tokio::time::sleep(Duration::from_millis(25)).await;
+                }
+                Err(error) => {
+                    return Err(codec_error(
+                        operation,
+                        format!("request failed after retry: {error}"),
+                    ));
+                }
+            }
+        };
         let status = response.status();
         if !status.is_success() {
             return Err(codec_error(
@@ -617,6 +654,44 @@ pub trait TemporalService: Send + Sync {
         name: &str,
     ) -> Result<WorkerDeploymentDetails, ServiceError>;
 
+    async fn query_workflow(
+        &self,
+        namespace: &str,
+        key: &WorkflowKey,
+        query_name: &str,
+        arguments: Vec<Value>,
+    ) -> Result<WorkflowCallResult, ServiceError>;
+
+    async fn update_workflow(
+        &self,
+        namespace: &str,
+        key: &WorkflowKey,
+        update_name: &str,
+        arguments: Vec<Value>,
+    ) -> Result<WorkflowCallResult, ServiceError>;
+
+    async fn pause_workflow(
+        &self,
+        namespace: &str,
+        key: &WorkflowKey,
+        reason: &str,
+    ) -> Result<(), ServiceError>;
+
+    async fn unpause_workflow(
+        &self,
+        namespace: &str,
+        key: &WorkflowKey,
+        reason: &str,
+    ) -> Result<(), ServiceError>;
+
+    async fn reset_workflow(
+        &self,
+        namespace: &str,
+        key: &WorkflowKey,
+        event_id: i64,
+        reason: &str,
+    ) -> Result<String, ServiceError>;
+
     async fn cancel_workflow(
         &self,
         namespace: &str,
@@ -638,6 +713,63 @@ pub trait TemporalService: Send + Sync {
         signal_name: &str,
         input: Value,
     ) -> Result<(), ServiceError>;
+
+    async fn list_schedules(
+        &self,
+        namespace: &str,
+        query: &str,
+        page_size: usize,
+        next_page_token: Vec<u8>,
+    ) -> Result<SchedulePage, ServiceError>;
+
+    async fn describe_schedule(
+        &self,
+        namespace: &str,
+        schedule_id: &str,
+    ) -> Result<ScheduleDetails, ServiceError>;
+
+    async fn create_schedule(
+        &self,
+        namespace: &str,
+        request: ScheduleCreateRequest,
+    ) -> Result<(), ServiceError>;
+
+    async fn update_schedule(
+        &self,
+        namespace: &str,
+        schedule_id: &str,
+        request: ScheduleUpdateRequest,
+    ) -> Result<(), ServiceError>;
+
+    async fn pause_schedule(
+        &self,
+        namespace: &str,
+        schedule_id: &str,
+        note: &str,
+    ) -> Result<(), ServiceError>;
+
+    async fn unpause_schedule(
+        &self,
+        namespace: &str,
+        schedule_id: &str,
+        note: &str,
+    ) -> Result<(), ServiceError>;
+
+    async fn trigger_schedule(
+        &self,
+        namespace: &str,
+        schedule_id: &str,
+    ) -> Result<(), ServiceError>;
+
+    async fn backfill_schedule(
+        &self,
+        namespace: &str,
+        schedule_id: &str,
+        request: ScheduleBackfillRequest,
+    ) -> Result<(), ServiceError>;
+
+    async fn delete_schedule(&self, namespace: &str, schedule_id: &str)
+    -> Result<(), ServiceError>;
 }
 
 /// Temporal's official Rust client adapted to the dashboard boundary.
@@ -758,6 +890,67 @@ impl GrpcTemporalService {
             }
             None => Ok(payloads),
         }
+    }
+
+    async fn encode_json_arguments(
+        &self,
+        namespace: &str,
+        arguments: &[Value],
+    ) -> Result<Payloads, ServiceError> {
+        let converter = PayloadConverter::serde_json();
+        let payloads = arguments
+            .iter()
+            .flat_map(|argument| RawValue::from_value(argument, &converter).payloads)
+            .collect();
+        Ok(Payloads {
+            payloads: self.encode_payloads(namespace, payloads).await?,
+        })
+    }
+
+    async fn describe_schedule_raw(
+        &self,
+        namespace: &str,
+        schedule_id: &str,
+    ) -> Result<DescribeScheduleResponse, ServiceError> {
+        let mut service = self.connection.workflow_service();
+        service
+            .describe_schedule(
+                DescribeScheduleRequest {
+                    namespace: namespace.to_string(),
+                    schedule_id: schedule_id.to_string(),
+                }
+                .into_request(),
+            )
+            .await
+            .map_err(|source| ServiceError::Rpc {
+                operation: "describe schedule",
+                source,
+            })
+            .map(temporalio_client::tonic::Response::into_inner)
+    }
+
+    async fn patch_schedule(
+        &self,
+        namespace: &str,
+        schedule_id: &str,
+        patch: SchedulePatch,
+        operation: &'static str,
+    ) -> Result<(), ServiceError> {
+        let mut service = self.connection.workflow_service();
+        service
+            .patch_schedule(
+                PatchScheduleRequest {
+                    namespace: namespace.to_string(),
+                    schedule_id: schedule_id.to_string(),
+                    patch: Some(patch),
+                    identity: client_identity(),
+                    request_id: operation_request_id(),
+                }
+                .into_request(),
+            )
+            .await
+            .map_err(|source| ServiceError::Rpc { operation, source })
+            .map(|_| ())
     }
 
     async fn recent_history(
@@ -1216,6 +1409,234 @@ impl TemporalService for GrpcTemporalService {
         Ok(worker_deployment_details(&info))
     }
 
+    async fn query_workflow(
+        &self,
+        namespace: &str,
+        key: &WorkflowKey,
+        query_name: &str,
+        arguments: Vec<Value>,
+    ) -> Result<WorkflowCallResult, ServiceError> {
+        let query_args = self.encode_json_arguments(namespace, &arguments).await?;
+        let mut service = self.connection.workflow_service();
+        let mut response = service
+            .query_workflow(
+                QueryWorkflowRequest {
+                    namespace: namespace.to_string(),
+                    execution: Some(ProtoWorkflowExecution {
+                        workflow_id: key.workflow_id.clone(),
+                        run_id: key.run_id.clone(),
+                    }),
+                    query: Some(WorkflowQuery {
+                        query_type: query_name.to_string(),
+                        query_args: Some(query_args),
+                        header: None,
+                    }),
+                    query_reject_condition: 0,
+                }
+                .into_request(),
+            )
+            .await
+            .map_err(|source| ServiceError::Rpc {
+                operation: "query workflow",
+                source,
+            })?
+            .into_inner();
+        self.decode_message(namespace, &mut response).await?;
+        if let Some(rejected) = response.query_rejected {
+            return Err(ServiceError::Client {
+                operation: "query workflow",
+                message: format!(
+                    "query was rejected for workflow status {}",
+                    enum_label::<WorkflowExecutionStatus>(rejected.status)
+                ),
+            });
+        }
+        Ok(WorkflowCallResult {
+            handler: query_name.to_string(),
+            update_id: None,
+            fields: payload_fields("result", response.query_result.as_ref()),
+            failure: None,
+        })
+    }
+
+    async fn update_workflow(
+        &self,
+        namespace: &str,
+        key: &WorkflowKey,
+        update_name: &str,
+        arguments: Vec<Value>,
+    ) -> Result<WorkflowCallResult, ServiceError> {
+        let args = self.encode_json_arguments(namespace, &arguments).await?;
+        let update_id = operation_request_id();
+        let mut service = self.connection.workflow_service();
+        let mut response = service
+            .update_workflow_execution(
+                UpdateWorkflowExecutionRequest {
+                    namespace: namespace.to_string(),
+                    workflow_execution: Some(ProtoWorkflowExecution {
+                        workflow_id: key.workflow_id.clone(),
+                        run_id: key.run_id.clone(),
+                    }),
+                    first_execution_run_id: String::new(),
+                    wait_policy: Some(WaitPolicy {
+                        lifecycle_stage: UpdateWorkflowExecutionLifecycleStage::Completed as i32,
+                    }),
+                    request: Some(UpdateRequest {
+                        meta: Some(UpdateMeta {
+                            update_id: update_id.clone(),
+                            identity: client_identity(),
+                        }),
+                        input: Some(UpdateInput {
+                            header: None,
+                            name: update_name.to_string(),
+                            args: Some(args),
+                        }),
+                        request_id: operation_request_id(),
+                        completion_callbacks: Vec::new(),
+                        links: Vec::new(),
+                    }),
+                }
+                .into_request(),
+            )
+            .await
+            .map_err(|source| ServiceError::Rpc {
+                operation: "update workflow",
+                source,
+            })?
+            .into_inner();
+        self.decode_message(namespace, &mut response).await?;
+
+        let mut outcome = response.outcome;
+        let mut update_ref = response.update_ref;
+        while outcome.is_none() {
+            let reference = update_ref.clone().ok_or_else(|| ServiceError::Client {
+                operation: "update workflow",
+                message: "server returned neither an outcome nor an update reference".to_string(),
+            })?;
+            let mut poll = service
+                .poll_workflow_execution_update(
+                    PollWorkflowExecutionUpdateRequest {
+                        namespace: namespace.to_string(),
+                        update_ref: Some(reference),
+                        identity: client_identity(),
+                        wait_policy: Some(WaitPolicy {
+                            lifecycle_stage: UpdateWorkflowExecutionLifecycleStage::Completed
+                                as i32,
+                        }),
+                    }
+                    .into_request(),
+                )
+                .await
+                .map_err(|source| ServiceError::Rpc {
+                    operation: "poll workflow update",
+                    source,
+                })?
+                .into_inner();
+            self.decode_message(namespace, &mut poll).await?;
+            outcome = poll.outcome;
+            if poll.update_ref.is_some() {
+                update_ref = poll.update_ref;
+            }
+            if outcome.is_none()
+                && poll.stage == UpdateWorkflowExecutionLifecycleStage::Unspecified as i32
+            {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        }
+
+        workflow_update_result(
+            update_name,
+            update_id,
+            outcome.expect("outcome was checked above"),
+        )
+    }
+
+    async fn pause_workflow(
+        &self,
+        namespace: &str,
+        key: &WorkflowKey,
+        reason: &str,
+    ) -> Result<(), ServiceError> {
+        let mut service = self.connection.workflow_service();
+        service
+            .pause_workflow_execution(
+                PauseWorkflowExecutionRequest {
+                    namespace: namespace.to_string(),
+                    workflow_id: key.workflow_id.clone(),
+                    run_id: key.run_id.clone(),
+                    identity: client_identity(),
+                    reason: reason.to_string(),
+                    request_id: operation_request_id(),
+                }
+                .into_request(),
+            )
+            .await
+            .map_err(|source| ServiceError::Rpc {
+                operation: "pause workflow execution",
+                source,
+            })
+            .map(|_| ())
+    }
+
+    async fn unpause_workflow(
+        &self,
+        namespace: &str,
+        key: &WorkflowKey,
+        reason: &str,
+    ) -> Result<(), ServiceError> {
+        let mut service = self.connection.workflow_service();
+        service
+            .unpause_workflow_execution(
+                UnpauseWorkflowExecutionRequest {
+                    namespace: namespace.to_string(),
+                    workflow_id: key.workflow_id.clone(),
+                    run_id: key.run_id.clone(),
+                    identity: client_identity(),
+                    reason: reason.to_string(),
+                    request_id: operation_request_id(),
+                }
+                .into_request(),
+            )
+            .await
+            .map_err(|source| ServiceError::Rpc {
+                operation: "unpause workflow execution",
+                source,
+            })
+            .map(|_| ())
+    }
+
+    async fn reset_workflow(
+        &self,
+        namespace: &str,
+        key: &WorkflowKey,
+        event_id: i64,
+        reason: &str,
+    ) -> Result<String, ServiceError> {
+        let mut service = self.connection.workflow_service();
+        service
+            .reset_workflow_execution(
+                ResetWorkflowExecutionRequest {
+                    namespace: namespace.to_string(),
+                    workflow_execution: Some(ProtoWorkflowExecution {
+                        workflow_id: key.workflow_id.clone(),
+                        run_id: key.run_id.clone(),
+                    }),
+                    reason: reason.to_string(),
+                    workflow_task_finish_event_id: event_id,
+                    request_id: operation_request_id(),
+                    identity: client_identity(),
+                    ..Default::default()
+                }
+                .into_request(),
+            )
+            .await
+            .map_err(|source| ServiceError::Rpc {
+                operation: "reset workflow execution",
+                source,
+            })
+            .map(|response| response.into_inner().run_id)
+    }
+
     async fn cancel_workflow(
         &self,
         namespace: &str,
@@ -1287,6 +1708,574 @@ impl TemporalService for GrpcTemporalService {
                 source,
             })
             .map(|_| ())
+    }
+
+    async fn list_schedules(
+        &self,
+        namespace: &str,
+        query: &str,
+        page_size: usize,
+        next_page_token: Vec<u8>,
+    ) -> Result<SchedulePage, ServiceError> {
+        let mut service = self.connection.workflow_service();
+        let response = service
+            .list_schedules(
+                ListSchedulesRequest {
+                    namespace: namespace.to_string(),
+                    maximum_page_size: i32::try_from(page_size).unwrap_or(i32::MAX),
+                    next_page_token,
+                    query: query.to_string(),
+                }
+                .into_request(),
+            )
+            .await
+            .map_err(|source| ServiceError::Rpc {
+                operation: "list schedules",
+                source,
+            })?
+            .into_inner();
+        Ok(SchedulePage {
+            schedules: response.schedules.iter().map(schedule_summary).collect(),
+            next_page_token: response.next_page_token,
+        })
+    }
+
+    async fn describe_schedule(
+        &self,
+        namespace: &str,
+        schedule_id: &str,
+    ) -> Result<ScheduleDetails, ServiceError> {
+        let mut response = self.describe_schedule_raw(namespace, schedule_id).await?;
+        self.decode_message(namespace, &mut response).await?;
+        schedule_details(schedule_id, &response)
+    }
+
+    async fn create_schedule(
+        &self,
+        namespace: &str,
+        request: ScheduleCreateRequest,
+    ) -> Result<(), ServiceError> {
+        let input = self
+            .encode_json_arguments(namespace, &request.arguments)
+            .await?;
+        let schedule = Schedule {
+            spec: Some(ScheduleSpec {
+                cron_string: vec![request.schedule_expression],
+                timezone_name: request.timezone,
+                ..Default::default()
+            }),
+            action: Some(ScheduleAction {
+                action: Some(schedule_action::Action::StartWorkflow(
+                    NewWorkflowExecutionInfo {
+                        workflow_id: request.workflow_id,
+                        workflow_type: Some(WorkflowType {
+                            name: request.workflow_type,
+                        }),
+                        task_queue: Some(ProtoTaskQueue {
+                            name: request.task_queue,
+                            ..Default::default()
+                        }),
+                        input: Some(input),
+                        ..Default::default()
+                    },
+                )),
+            }),
+            policies: None,
+            state: Some(ScheduleState {
+                notes: request.notes,
+                paused: request.paused,
+                ..Default::default()
+            }),
+        };
+        let mut service = self.connection.workflow_service();
+        service
+            .create_schedule(
+                CreateScheduleRequest {
+                    namespace: namespace.to_string(),
+                    schedule_id: request.schedule_id,
+                    schedule: Some(schedule),
+                    initial_patch: None,
+                    identity: client_identity(),
+                    request_id: operation_request_id(),
+                    memo: None,
+                    search_attributes: None,
+                }
+                .into_request(),
+            )
+            .await
+            .map_err(|source| ServiceError::Rpc {
+                operation: "create schedule",
+                source,
+            })
+            .map(|_| ())
+    }
+
+    async fn update_schedule(
+        &self,
+        namespace: &str,
+        schedule_id: &str,
+        request: ScheduleUpdateRequest,
+    ) -> Result<(), ServiceError> {
+        let response = self.describe_schedule_raw(namespace, schedule_id).await?;
+        let mut schedule = response.schedule.ok_or_else(|| ServiceError::Client {
+            operation: "update schedule",
+            message: "describe response did not include a schedule definition".to_string(),
+        })?;
+
+        if request.schedule_expression.is_some() || request.timezone.is_some() {
+            let current_timezone = schedule
+                .spec
+                .as_ref()
+                .map(|spec| spec.timezone_name.clone())
+                .unwrap_or_default();
+            if let Some(expression) = request.schedule_expression {
+                schedule.spec = Some(ScheduleSpec {
+                    cron_string: vec![expression],
+                    timezone_name: request.timezone.unwrap_or(current_timezone),
+                    ..Default::default()
+                });
+            } else if let Some(timezone) = request.timezone {
+                schedule
+                    .spec
+                    .get_or_insert_with(ScheduleSpec::default)
+                    .timezone_name = timezone;
+            }
+        }
+        let state = schedule.state.get_or_insert_with(ScheduleState::default);
+        state.notes = request.notes;
+
+        let mut service = self.connection.workflow_service();
+        service
+            .update_schedule(
+                ProtoUpdateScheduleRequest {
+                    namespace: namespace.to_string(),
+                    schedule_id: schedule_id.to_string(),
+                    schedule: Some(schedule),
+                    conflict_token: response.conflict_token,
+                    identity: client_identity(),
+                    request_id: operation_request_id(),
+                    search_attributes: None,
+                    memo: None,
+                }
+                .into_request(),
+            )
+            .await
+            .map_err(|source| ServiceError::Rpc {
+                operation: "update schedule",
+                source,
+            })
+            .map(|_| ())
+    }
+
+    async fn pause_schedule(
+        &self,
+        namespace: &str,
+        schedule_id: &str,
+        note: &str,
+    ) -> Result<(), ServiceError> {
+        self.patch_schedule(
+            namespace,
+            schedule_id,
+            SchedulePatch {
+                pause: note.to_string(),
+                ..Default::default()
+            },
+            "pause schedule",
+        )
+        .await
+    }
+
+    async fn unpause_schedule(
+        &self,
+        namespace: &str,
+        schedule_id: &str,
+        note: &str,
+    ) -> Result<(), ServiceError> {
+        self.patch_schedule(
+            namespace,
+            schedule_id,
+            SchedulePatch {
+                unpause: note.to_string(),
+                ..Default::default()
+            },
+            "unpause schedule",
+        )
+        .await
+    }
+
+    async fn trigger_schedule(
+        &self,
+        namespace: &str,
+        schedule_id: &str,
+    ) -> Result<(), ServiceError> {
+        self.patch_schedule(
+            namespace,
+            schedule_id,
+            SchedulePatch {
+                trigger_immediately: Some(TriggerImmediatelyRequest {
+                    overlap_policy: ScheduleOverlapPolicy::Unspecified as i32,
+                    scheduled_time: None,
+                }),
+                ..Default::default()
+            },
+            "trigger schedule",
+        )
+        .await
+    }
+
+    async fn backfill_schedule(
+        &self,
+        namespace: &str,
+        schedule_id: &str,
+        request: ScheduleBackfillRequest,
+    ) -> Result<(), ServiceError> {
+        let overlap_policy = parse_schedule_overlap_policy(&request.overlap_policy)?;
+        self.patch_schedule(
+            namespace,
+            schedule_id,
+            SchedulePatch {
+                backfill_request: vec![ProtoScheduleBackfillRequest {
+                    start_time: Some(datetime_to_proto(request.start_time)),
+                    end_time: Some(datetime_to_proto(request.end_time)),
+                    overlap_policy: overlap_policy as i32,
+                }],
+                ..Default::default()
+            },
+            "backfill schedule",
+        )
+        .await
+    }
+
+    async fn delete_schedule(
+        &self,
+        namespace: &str,
+        schedule_id: &str,
+    ) -> Result<(), ServiceError> {
+        let mut service = self.connection.workflow_service();
+        service
+            .delete_schedule(
+                DeleteScheduleRequest {
+                    namespace: namespace.to_string(),
+                    schedule_id: schedule_id.to_string(),
+                    identity: client_identity(),
+                }
+                .into_request(),
+            )
+            .await
+            .map_err(|source| ServiceError::Rpc {
+                operation: "delete schedule",
+                source,
+            })
+            .map(|_| ())
+    }
+}
+
+fn workflow_update_result(
+    handler: &str,
+    update_id: String,
+    outcome: UpdateOutcome,
+) -> Result<WorkflowCallResult, ServiceError> {
+    match outcome.value {
+        Some(outcome::Value::Success(payloads)) => Ok(WorkflowCallResult {
+            handler: handler.to_string(),
+            update_id: Some(update_id),
+            fields: payload_fields("result", Some(&payloads)),
+            failure: None,
+        }),
+        Some(outcome::Value::Failure(failure)) => Ok(WorkflowCallResult {
+            handler: handler.to_string(),
+            update_id: Some(update_id),
+            fields: Vec::new(),
+            failure: Some(failure_summary(&failure)),
+        }),
+        None => Err(ServiceError::Client {
+            operation: "update workflow",
+            message: "completed update did not contain an outcome value".to_string(),
+        }),
+    }
+}
+
+fn schedule_summary(entry: &ScheduleListEntry) -> ScheduleSummary {
+    let info = entry.info.as_ref();
+    ScheduleSummary {
+        schedule_id: entry.schedule_id.clone(),
+        paused: info.is_some_and(|value| value.paused),
+        notes: info.map(|value| value.notes.clone()).unwrap_or_default(),
+        workflow_type: info
+            .and_then(|value| value.workflow_type.as_ref())
+            .map(|value| value.name.clone())
+            .unwrap_or_default(),
+        next_action_time: info
+            .and_then(|value| value.future_action_times.first())
+            .and_then(proto_datetime),
+        recent_action_time: info
+            .and_then(|value| value.recent_actions.first())
+            .and_then(schedule_action_time),
+        state_size_bytes: info.map_or(0, |value| value.state_size_bytes),
+    }
+}
+
+fn schedule_details(
+    schedule_id: &str,
+    response: &DescribeScheduleResponse,
+) -> Result<ScheduleDetails, ServiceError> {
+    let schedule = response
+        .schedule
+        .as_ref()
+        .ok_or_else(|| ServiceError::Client {
+            operation: "describe schedule",
+            message: "response did not include a schedule definition".to_string(),
+        })?;
+    let state = schedule.state.as_ref();
+    let info = response.info.as_ref();
+    let action = schedule
+        .action
+        .as_ref()
+        .and_then(|value| value.action.as_ref());
+    let start_workflow = action.map(|schedule_action::Action::StartWorkflow(workflow)| workflow);
+    let workflow_type = start_workflow
+        .and_then(|workflow| workflow.workflow_type.as_ref())
+        .map(|value| value.name.clone())
+        .unwrap_or_default();
+    let summary = ScheduleSummary {
+        schedule_id: schedule_id.to_string(),
+        paused: state.is_some_and(|value| value.paused),
+        notes: state.map(|value| value.notes.clone()).unwrap_or_default(),
+        workflow_type,
+        next_action_time: info
+            .and_then(|value| value.future_action_times.first())
+            .and_then(proto_datetime),
+        recent_action_time: info
+            .and_then(|value| value.recent_actions.first())
+            .and_then(schedule_action_time),
+        state_size_bytes: info.map_or(0, |value| value.state_size_bytes),
+    };
+    let policies = schedule.policies.as_ref();
+    Ok(ScheduleDetails {
+        summary,
+        workflow_id: start_workflow
+            .map(|workflow| workflow.workflow_id.clone())
+            .unwrap_or_default(),
+        task_queue: start_workflow
+            .and_then(|workflow| workflow.task_queue.as_ref())
+            .map(|value| value.name.clone())
+            .unwrap_or_default(),
+        timing: schedule
+            .spec
+            .as_ref()
+            .map_or_else(Vec::new, schedule_timing),
+        timezone: schedule
+            .spec
+            .as_ref()
+            .map(|spec| spec.timezone_name.clone())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "UTC".to_string()),
+        overlap_policy: policies.map_or_else(
+            || "SERVER DEFAULT".to_string(),
+            |value| enum_label::<ScheduleOverlapPolicy>(value.overlap_policy),
+        ),
+        catchup_window: policies
+            .and_then(|value| value.catchup_window.as_ref())
+            .map_or_else(|| "server default".to_string(), format_duration),
+        pause_on_failure: policies.is_some_and(|value| value.pause_on_failure),
+        keep_original_workflow_id: policies.is_some_and(|value| value.keep_original_workflow_id),
+        limited_actions: state.is_some_and(|value| value.limited_actions),
+        remaining_actions: state.map_or(0, |value| value.remaining_actions),
+        action_count: info.map_or(0, |value| value.action_count),
+        missed_catchup_window: info.map_or(0, |value| value.missed_catchup_window),
+        overlap_skipped: info.map_or(0, |value| value.overlap_skipped),
+        buffer_dropped: info.map_or(0, |value| value.buffer_dropped),
+        buffer_size: info.map_or(0, |value| value.buffer_size),
+        running_workflows: info.map_or_else(Vec::new, |value| {
+            value
+                .running_workflows
+                .iter()
+                .map(|workflow| WorkflowKey {
+                    workflow_id: workflow.workflow_id.clone(),
+                    run_id: workflow.run_id.clone(),
+                })
+                .collect()
+        }),
+        recent_actions: info.map_or_else(Vec::new, |value| {
+            value
+                .recent_actions
+                .iter()
+                .map(schedule_action_result)
+                .collect()
+        }),
+        future_action_times: info.map_or_else(Vec::new, |value| {
+            value
+                .future_action_times
+                .iter()
+                .filter_map(proto_datetime)
+                .collect()
+        }),
+        create_time: info
+            .and_then(|value| value.create_time.as_ref())
+            .and_then(proto_datetime),
+        update_time: info
+            .and_then(|value| value.update_time.as_ref())
+            .and_then(proto_datetime),
+        input: start_workflow.map_or_else(Vec::new, |workflow| {
+            payload_fields("input", workflow.input.as_ref())
+        }),
+        memo: response
+            .memo
+            .as_ref()
+            .map_or_else(Vec::new, |memo| payload_map(&memo.fields)),
+        search_attributes: response
+            .search_attributes
+            .as_ref()
+            .map_or_else(Vec::new, |attributes| {
+                payload_map(&attributes.indexed_fields)
+            }),
+    })
+}
+
+fn schedule_action_time(action: &ProtoScheduleActionResult) -> Option<DateTime<Utc>> {
+    action
+        .actual_time
+        .as_ref()
+        .or(action.schedule_time.as_ref())
+        .and_then(proto_datetime)
+}
+
+fn schedule_action_result(action: &ProtoScheduleActionResult) -> ScheduleActionResult {
+    let execution = action.start_workflow_result.as_ref();
+    ScheduleActionResult {
+        scheduled_time: action.schedule_time.as_ref().and_then(proto_datetime),
+        actual_time: action.actual_time.as_ref().and_then(proto_datetime),
+        workflow_id: execution
+            .map(|value| value.workflow_id.clone())
+            .unwrap_or_default(),
+        run_id: execution
+            .map(|value| value.run_id.clone())
+            .unwrap_or_default(),
+        workflow_status: enum_label::<WorkflowExecutionStatus>(action.start_workflow_status),
+    }
+}
+
+fn schedule_timing(spec: &ScheduleSpec) -> Vec<String> {
+    let mut timing = spec
+        .cron_string
+        .iter()
+        .map(|cron| format!("cron {cron}"))
+        .collect::<Vec<_>>();
+    timing.extend(spec.interval.iter().map(format_interval));
+    timing.extend(spec.calendar.iter().map(format_calendar));
+    timing.extend(
+        spec.structured_calendar
+            .iter()
+            .map(|calendar| format_structured_calendar(calendar, "calendar")),
+    );
+    timing.extend(
+        spec.exclude_structured_calendar
+            .iter()
+            .map(|calendar| format_structured_calendar(calendar, "exclude")),
+    );
+    if timing.is_empty() {
+        timing.push("no future matching times".to_string());
+    }
+    timing
+}
+
+fn format_interval(interval: &IntervalSpec) -> String {
+    let every = interval
+        .interval
+        .as_ref()
+        .map_or_else(|| "missing".to_string(), format_duration);
+    let phase = interval
+        .phase
+        .as_ref()
+        .filter(|value| value.seconds != 0 || value.nanos != 0)
+        .map(format_duration);
+    phase.map_or_else(
+        || format!("every {every}"),
+        |phase| format!("every {every} / phase {phase}"),
+    )
+}
+
+fn format_calendar(calendar: &CalendarSpec) -> String {
+    format!(
+        "calendar sec={} min={} hour={} dom={} month={} dow={} year={}{}",
+        calendar.second,
+        calendar.minute,
+        calendar.hour,
+        calendar.day_of_month,
+        calendar.month,
+        calendar.day_of_week,
+        calendar.year,
+        if calendar.comment.is_empty() {
+            String::new()
+        } else {
+            format!(" # {}", calendar.comment)
+        }
+    )
+}
+
+fn format_structured_calendar(calendar: &StructuredCalendarSpec, kind: &str) -> String {
+    format!(
+        "{kind} sec={} min={} hour={} dom={} month={} dow={} year={}{}",
+        format_ranges(&calendar.second),
+        format_ranges(&calendar.minute),
+        format_ranges(&calendar.hour),
+        format_ranges(&calendar.day_of_month),
+        format_ranges(&calendar.month),
+        format_ranges(&calendar.day_of_week),
+        format_ranges(&calendar.year),
+        if calendar.comment.is_empty() {
+            String::new()
+        } else {
+            format!(" # {}", calendar.comment)
+        }
+    )
+}
+
+fn format_ranges(ranges: &[Range]) -> String {
+    if ranges.is_empty() {
+        return "*".to_string();
+    }
+    ranges
+        .iter()
+        .map(|range| {
+            let end = range.end.max(range.start);
+            let step = range.step.max(1);
+            if end == range.start && step == 1 {
+                range.start.to_string()
+            } else if step == 1 {
+                format!("{}-{end}", range.start)
+            } else {
+                format!("{}-{end}/{step}", range.start)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn parse_schedule_overlap_policy(value: &str) -> Result<ScheduleOverlapPolicy, ServiceError> {
+    let normalized = value.trim().to_ascii_lowercase().replace(['_', ' '], "-");
+    match normalized.as_str() {
+        "" | "default" | "unspecified" => Ok(ScheduleOverlapPolicy::Unspecified),
+        "skip" => Ok(ScheduleOverlapPolicy::Skip),
+        "buffer-one" => Ok(ScheduleOverlapPolicy::BufferOne),
+        "buffer-all" => Ok(ScheduleOverlapPolicy::BufferAll),
+        "cancel-other" => Ok(ScheduleOverlapPolicy::CancelOther),
+        "terminate-other" => Ok(ScheduleOverlapPolicy::TerminateOther),
+        "allow-all" => Ok(ScheduleOverlapPolicy::AllowAll),
+        _ => Err(ServiceError::Client {
+            operation: "backfill schedule",
+            message: format!(
+                "unknown overlap policy `{value}`; use skip, buffer-one, buffer-all, \
+                 cancel-other, terminate-other, or allow-all"
+            ),
+        }),
+    }
+}
+
+fn datetime_to_proto(value: DateTime<Utc>) -> prost_wkt_types::Timestamp {
+    prost_wkt_types::Timestamp {
+        seconds: value.timestamp(),
+        nanos: i32::try_from(value.timestamp_subsec_nanos()).unwrap_or_default(),
     }
 }
 
@@ -2072,6 +3061,7 @@ mod tests {
             WorkerStatus,
         },
         history::v1::ActivityTaskScheduledEventAttributes,
+        schedule::v1::{ScheduleInfo, ScheduleListInfo},
         taskqueue::v1::{PollerInfo, TaskQueueVersioningInfo},
         worker::v1::{WorkerHostInfo, WorkerPollerInfo},
     };
@@ -2343,6 +3333,123 @@ mod tests {
         assert_eq!(details.routing_update_state, "COMPLETED");
     }
 
+    #[test]
+    fn maps_schedule_visibility_definition_and_runtime_state() {
+        let next = prost_wkt_types::Timestamp {
+            seconds: 1_800_000_000,
+            nanos: 0,
+        };
+        let entry = ScheduleListEntry {
+            schedule_id: "hourly-orders".to_string(),
+            info: Some(ScheduleListInfo {
+                workflow_type: Some(WorkflowType {
+                    name: "OrderWorkflow".to_string(),
+                }),
+                notes: "operator note".to_string(),
+                paused: true,
+                future_action_times: vec![next],
+                state_size_bytes: 1_024,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let summary = schedule_summary(&entry);
+        assert_eq!(summary.schedule_id, "hourly-orders");
+        assert!(summary.paused);
+        assert_eq!(summary.workflow_type, "OrderWorkflow");
+        assert!(summary.next_action_time.is_some());
+
+        let response = DescribeScheduleResponse {
+            schedule: Some(Schedule {
+                spec: Some(ScheduleSpec {
+                    interval: vec![IntervalSpec {
+                        interval: Some(prost_wkt_types::Duration {
+                            seconds: 3_600,
+                            nanos: 0,
+                        }),
+                        phase: None,
+                    }],
+                    timezone_name: "UTC".to_string(),
+                    ..Default::default()
+                }),
+                action: Some(ScheduleAction {
+                    action: Some(schedule_action::Action::StartWorkflow(
+                        NewWorkflowExecutionInfo {
+                            workflow_id: "order-run".to_string(),
+                            workflow_type: Some(WorkflowType {
+                                name: "OrderWorkflow".to_string(),
+                            }),
+                            task_queue: Some(ProtoTaskQueue {
+                                name: "orders".to_string(),
+                                ..Default::default()
+                            }),
+                            input: Some(Payloads {
+                                payloads: vec![Payload {
+                                    metadata: HashMap::from([(
+                                        "encoding".to_string(),
+                                        b"json/plain".to_vec(),
+                                    )]),
+                                    data: br#"{"region":"eu"}"#.to_vec(),
+                                    ..Default::default()
+                                }],
+                            }),
+                            ..Default::default()
+                        },
+                    )),
+                }),
+                state: Some(ScheduleState {
+                    notes: "operator note".to_string(),
+                    paused: true,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            info: Some(ScheduleInfo {
+                action_count: 7,
+                future_action_times: vec![next],
+                running_workflows: vec![WorkflowExecution {
+                    workflow_id: "order-run-2026".to_string(),
+                    run_id: "run-a".to_string(),
+                }],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let details = schedule_details("hourly-orders", &response).unwrap();
+        assert_eq!(details.summary.workflow_type, "OrderWorkflow");
+        assert_eq!(details.workflow_id, "order-run");
+        assert_eq!(details.task_queue, "orders");
+        assert_eq!(details.timing, vec!["every 1h"]);
+        assert_eq!(details.action_count, 7);
+        assert_eq!(details.running_workflows[0].run_id, "run-a");
+        assert!(details.input[0].value.contains("\"region\": \"eu\""));
+    }
+
+    #[test]
+    fn update_outcomes_and_overlap_policy_are_explicit() {
+        let success = workflow_update_result(
+            "approve",
+            "update-1".to_string(),
+            UpdateOutcome {
+                value: Some(outcome::Value::Success(Payloads {
+                    payloads: vec![Payload {
+                        metadata: HashMap::from([("encoding".to_string(), b"json/plain".to_vec())]),
+                        data: b"true".to_vec(),
+                        ..Default::default()
+                    }],
+                })),
+            },
+        )
+        .unwrap();
+        assert_eq!(success.update_id.as_deref(), Some("update-1"));
+        assert_eq!(success.fields[0].value, "true");
+        assert_eq!(
+            parse_schedule_overlap_policy("buffer_all").unwrap(),
+            ScheduleOverlapPolicy::BufferAll
+        );
+        assert!(parse_schedule_overlap_policy("drop-everything").is_err());
+    }
+
     #[tokio::test]
     async fn codec_server_uses_temporal_proto_json_and_namespace_routing() {
         let decoded_data = br#"{"customer":"Ada"}"#;
@@ -2396,6 +3503,46 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn codec_server_retries_one_transient_connection_failure() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        let response_body = serde_json::json!({
+            "payloads": [{
+                "metadata": {
+                    "encoding": BASE64_STANDARD.encode("json/plain")
+                },
+                "data": BASE64_STANDARD.encode("true")
+            }]
+        })
+        .to_string();
+        let server = thread::spawn(move || {
+            let (first, _) = listener.accept().unwrap();
+            drop(first);
+            let (mut second, _) = listener.accept().unwrap();
+            let _ = read_test_http_request(&mut second);
+            write!(
+                second,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: \
+                 {}\r\nConnection: close\r\n\r\n{}",
+                response_body.len(),
+                response_body
+            )
+            .unwrap();
+        });
+        let codec = HttpPayloadCodec::new(PayloadCodecConfig {
+            endpoint: format!("http://{address}"),
+            headers: HashMap::new(),
+        })
+        .unwrap();
+        let decoded = codec
+            .transform("default", CodecOperation::Decode, vec![Payload::default()])
+            .await
+            .unwrap();
+        assert_eq!(decoded[0].data, b"true");
+        server.join().unwrap();
+    }
+
     #[test]
     fn codec_url_replaces_an_existing_operation_and_rejects_credentials() {
         let codec = HttpPayloadCodec::new(PayloadCodecConfig {
@@ -2427,37 +3574,8 @@ mod tests {
         let (sender, receiver) = mpsc::channel();
         let server = thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
-            stream
-                .set_read_timeout(Some(Duration::from_secs(2)))
-                .unwrap();
-            let mut request = Vec::new();
-            let mut buffer = [0_u8; 4096];
-            let mut expected_length = None;
-            loop {
-                let count = stream.read(&mut buffer).unwrap();
-                if count == 0 {
-                    break;
-                }
-                request.extend_from_slice(&buffer[..count]);
-                if expected_length.is_none()
-                    && let Some(header_end) =
-                        request.windows(4).position(|window| window == b"\r\n\r\n")
-                {
-                    let headers = String::from_utf8_lossy(&request[..header_end]);
-                    let content_length = headers.lines().find_map(|line| {
-                        let (name, value) = line.split_once(':')?;
-                        name.eq_ignore_ascii_case("content-length")
-                            .then(|| value.trim().parse::<usize>().ok())
-                            .flatten()
-                    });
-                    expected_length =
-                        content_length.map(|length| header_end.saturating_add(4 + length));
-                }
-                if expected_length.is_some_and(|length| request.len() >= length) {
-                    break;
-                }
-            }
-            sender.send(String::from_utf8(request).unwrap()).unwrap();
+            let request = read_test_http_request(&mut stream);
+            sender.send(request).unwrap();
             write!(
                 stream,
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -2467,5 +3585,39 @@ mod tests {
             .unwrap();
         });
         (format!("http://{address}"), receiver, server)
+    }
+
+    fn read_test_http_request(stream: &mut std::net::TcpStream) -> String {
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let mut request = Vec::new();
+        let mut buffer = [0_u8; 4096];
+        let mut expected_length = None;
+        loop {
+            let count = stream.read(&mut buffer).unwrap();
+            if count == 0 {
+                break;
+            }
+            request.extend_from_slice(&buffer[..count]);
+            if expected_length.is_none()
+                && let Some(header_end) =
+                    request.windows(4).position(|window| window == b"\r\n\r\n")
+            {
+                let headers = String::from_utf8_lossy(&request[..header_end]);
+                let content_length = headers.lines().find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse::<usize>().ok())
+                        .flatten()
+                });
+                expected_length =
+                    content_length.map(|length| header_end.saturating_add(4 + length));
+            }
+            if expected_length.is_some_and(|length| request.len() >= length) {
+                break;
+            }
+        }
+        String::from_utf8(request).unwrap()
     }
 }

@@ -13,9 +13,12 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::{
     app::{
-        App, ConfirmAction, Focus, NoticeKind, Overlay, SignalField, SignalForm, TextInput, View,
+        App, ConfirmAction, Focus, HandlerField, NoticeKind, Overlay, ResetField, ResetForm,
+        ScheduleBackfillField, ScheduleBackfillForm, ScheduleConfirmAction, ScheduleCreateField,
+        ScheduleCreateForm, ScheduleEditField, ScheduleEditForm, SignalField, SignalForm,
+        TextInput, View, WorkflowCallForm, WorkflowCallKind,
     },
-    model::{FailureSummary, StructuredField, WorkflowStatus},
+    model::{FailureSummary, StructuredField, WorkflowCallResult, WorkflowStatus},
 };
 
 const MIN_WIDTH: u16 = 58;
@@ -44,6 +47,9 @@ pub fn render(frame: &mut Frame<'_>, app: &App) {
         match overlay {
             Overlay::Help => render_help(frame, area, theme),
             Overlay::Query(input) => render_query(frame, area, input, theme),
+            Overlay::ScheduleQuery(input) => {
+                render_schedule_query(frame, area, input, theme);
+            }
             Overlay::TaskQueue(input) => render_task_queue_input(frame, area, input, theme),
             Overlay::SavedQueryPicker { selected } => {
                 render_saved_queries(frame, area, app, *selected, theme);
@@ -61,6 +67,23 @@ pub fn render(frame: &mut Frame<'_>, app: &App) {
                 ..
             } => render_confirmation(frame, area, *action, workflow_id, input, theme),
             Overlay::Signal(form) => render_signal(frame, area, form, theme),
+            Overlay::WorkflowCall { kind, form } => {
+                render_workflow_call(frame, area, *kind, form, theme);
+            }
+            Overlay::WorkflowCallResult {
+                kind,
+                result,
+                scroll,
+            } => render_workflow_call_result(frame, area, *kind, result, *scroll, theme),
+            Overlay::Reset(form) => render_reset(frame, area, form, theme),
+            Overlay::ScheduleCreate(form) => render_schedule_create(frame, area, form, theme),
+            Overlay::ScheduleEdit(form) => render_schedule_edit(frame, area, form, theme),
+            Overlay::ScheduleBackfill(form) => render_schedule_backfill(frame, area, form, theme),
+            Overlay::ScheduleConfirm {
+                action,
+                schedule_id,
+                input,
+            } => render_schedule_confirmation(frame, area, *action, schedule_id, input, theme),
             Overlay::WorkflowChain { selected } => {
                 render_workflow_chain(frame, area, app, *selected, theme);
             }
@@ -88,16 +111,26 @@ fn render_header(frame: &mut Frame<'_>, app: &App, area: Rect, theme: Theme) {
     } else {
         "manual".to_string()
     };
-    let query = if app.query.is_empty() {
-        "all workflows".to_string()
+    let active_query = if app.view == View::Schedules {
+        &app.schedule_query
     } else {
-        format!("query: {}", app.query)
+        &app.query
+    };
+    let query = if active_query.is_empty() {
+        if app.view == View::Schedules {
+            "all schedules".to_string()
+        } else {
+            "all workflows".to_string()
+        }
+    } else {
+        format!("query: {active_query}")
     };
     let tabs = [
         View::Workflows,
         View::TaskQueues,
         View::Workers,
         View::Deployments,
+        View::Schedules,
     ]
     .into_iter()
     .flat_map(|view| {
@@ -178,6 +211,7 @@ fn render_dashboard(frame: &mut Frame<'_>, app: &App, area: Rect, theme: Theme) 
         View::TaskQueues => render_task_queue_dashboard(frame, app, area, theme),
         View::Workers => render_worker_dashboard(frame, app, area, theme),
         View::Deployments => render_deployment_dashboard(frame, app, area, theme),
+        View::Schedules => render_schedule_dashboard(frame, app, area, theme),
     }
 }
 
@@ -662,6 +696,179 @@ fn render_deployment_dashboard(frame: &mut Frame<'_>, app: &App, area: Rect, the
     );
 }
 
+fn render_schedule_dashboard(frame: &mut Frame<'_>, app: &App, area: Rect, theme: Theme) {
+    let [list_area, detail_area] = master_detail_areas(area);
+    let title = if app.loading_schedules {
+        format!(
+            " Schedules ({}) · page {} ⟳ ",
+            app.schedules.len(),
+            app.schedule_page_number
+        )
+    } else {
+        format!(
+            " Schedules ({}) · page {} ",
+            app.schedules.len(),
+            app.schedule_page_number
+        )
+    };
+    let rows = app.schedules.iter().map(|schedule| {
+        Row::new(vec![
+            Cell::from(if schedule.paused { "PAUSED" } else { "ACTIVE" }).style(
+                if schedule.paused {
+                    theme.warning()
+                } else {
+                    theme.success()
+                },
+            ),
+            Cell::from(schedule.schedule_id.clone()),
+            Cell::from(schedule.workflow_type.clone()),
+            Cell::from(format_time(schedule.next_action_time.as_ref())),
+            Cell::from(format_time(schedule.recent_action_time.as_ref())),
+        ])
+    });
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Length(9),
+            Constraint::Fill(2),
+            Constraint::Fill(2),
+            Constraint::Length(17),
+            Constraint::Length(17),
+        ],
+    )
+    .header(
+        Row::new(["STATE", "SCHEDULE ID", "WORKFLOW", "NEXT", "LAST"]).style(theme.table_header()),
+    )
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(theme.accent())
+            .title(Span::styled(title, theme.title())),
+    )
+    .row_highlight_style(theme.selection())
+    .highlight_symbol("› ");
+    let mut state = TableState::default()
+        .with_selected((!app.schedules.is_empty()).then_some(app.selected_schedule));
+    frame.render_stateful_widget(table, list_area, &mut state);
+
+    let Some(details) = &app.schedule_details else {
+        render_empty_panel(
+            frame,
+            detail_area,
+            " Schedule definition ",
+            app.schedules_error
+                .as_deref()
+                .unwrap_or(if app.loading_schedule_details {
+                    "Loading Schedule definition…"
+                } else {
+                    "No Schedules reported"
+                }),
+            theme,
+        );
+        return;
+    };
+    let state_label = if details.summary.paused {
+        "PAUSED"
+    } else {
+        "ACTIVE"
+    };
+    let mut lines = vec![
+        Line::from(vec![
+            Span::styled("State       ", theme.muted()),
+            Span::styled(
+                state_label,
+                if details.summary.paused {
+                    theme.warning()
+                } else {
+                    theme.success()
+                },
+            ),
+        ]),
+        inspector_value("ID", &details.summary.schedule_id, theme),
+        inspector_value("Workflow", &details.summary.workflow_type, theme),
+        inspector_value("Workflow ID", &details.workflow_id, theme),
+        inspector_value("Task queue", &details.task_queue, theme),
+        inspector_value("Timezone", &details.timezone, theme),
+        inspector_value("Overlap", &details.overlap_policy, theme),
+        inspector_value("Catchup", &details.catchup_window, theme),
+        inspector_value(
+            "Policies",
+            &format!(
+                "pause-on-failure={} · keep-workflow-id={}",
+                details.pause_on_failure, details.keep_original_workflow_id
+            ),
+            theme,
+        ),
+        inspector_value(
+            "Actions",
+            &format!(
+                "{} taken · {} running · {} buffered · {} skipped",
+                details.action_count,
+                details.running_workflows.len(),
+                details.buffer_size,
+                details.overlap_skipped
+            ),
+            theme,
+        ),
+        inspector_value(
+            "Next",
+            &format_time(details.future_action_times.first()),
+            theme,
+        ),
+    ];
+    if !details.summary.notes.is_empty() {
+        lines.push(inspector_value("Notes", &details.summary.notes, theme));
+    }
+    if details.limited_actions {
+        lines.push(inspector_value(
+            "Remaining",
+            &details.remaining_actions.to_string(),
+            theme,
+        ));
+    }
+    lines.push(Line::default());
+    lines.push(inspector_section("TIMING", theme));
+    lines.extend(
+        details
+            .timing
+            .iter()
+            .map(|timing| Line::from(timing.clone())),
+    );
+    append_structured_fields(&mut lines, "INPUT", &details.input, theme);
+    append_structured_fields(&mut lines, "MEMO", &details.memo, theme);
+    append_structured_fields(
+        &mut lines,
+        "SEARCH ATTRIBUTES",
+        &details.search_attributes,
+        theme,
+    );
+    if !details.recent_actions.is_empty() {
+        lines.push(Line::default());
+        lines.push(inspector_section("RECENT ACTIONS", theme));
+        lines.extend(details.recent_actions.iter().take(5).map(|action| {
+            Line::from(format!(
+                "{} · {} · {} · {}",
+                format_time(action.actual_time.as_ref()),
+                action.workflow_id,
+                action.run_id,
+                action.workflow_status
+            ))
+        }));
+    }
+    frame.render_widget(
+        Paragraph::new(Text::from(lines))
+            .wrap(Wrap { trim: false })
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(theme.border(false))
+                    .title(Span::styled(" Schedule definition ", theme.title()))
+                    .padding(Padding::horizontal(1)),
+            ),
+        detail_area,
+    );
+}
+
 fn render_empty_panel(
     frame: &mut Frame<'_>,
     area: Rect,
@@ -882,7 +1089,7 @@ fn render_footer(frame: &mut Frame<'_>, app: &App, area: Rect, theme: Theme) {
         ])
     } else {
         let mut spans = vec![
-            key_hint("1-4", "views", theme),
+            key_hint("1-5", "views", theme),
             Span::raw("  "),
             key_hint("j/k", "move", theme),
             Span::raw("  "),
@@ -904,6 +1111,16 @@ fn render_footer(frame: &mut Frame<'_>, app: &App, area: Rect, theme: Theme) {
             View::Workers | View::Deployments => {
                 spans.extend([key_hint("[/]", "pages", theme), Span::raw("  ")]);
             }
+            View::Schedules => spans.extend([
+                key_hint("/", "query", theme),
+                Span::raw("  "),
+                key_hint("N/E", "new/edit", theme),
+                Span::raw("  "),
+                key_hint("p/t/b/d", "control", theme),
+                Span::raw("  "),
+                key_hint("[/]", "pages", theme),
+                Span::raw("  "),
+            ]),
         }
         spans.extend([
             key_hint("r", "refresh", theme),
@@ -920,7 +1137,7 @@ fn render_footer(frame: &mut Frame<'_>, app: &App, area: Rect, theme: Theme) {
 }
 
 fn render_help(frame: &mut Frame<'_>, area: Rect, theme: Theme) {
-    let popup = centered(area, 82, 32);
+    let popup = centered(area, 88, 42);
     frame.render_widget(Clear, popup);
     let help = Text::from(vec![
         help_section("VIEWS", theme),
@@ -932,6 +1149,7 @@ fn render_help(frame: &mut Frame<'_>, area: Rect, theme: Theme) {
         ),
         help_line("3", "heartbeat-enabled Worker runtime diagnostics", theme),
         help_line("4", "GA Worker Deployment routing and drainage", theme),
+        help_line("5", "Schedule visibility, definition, and control", theme),
         help_line(
             "/",
             "query Workflows or inspect a Task Queue by name",
@@ -964,8 +1182,18 @@ fn render_help(frame: &mut Frame<'_>, area: Rect, theme: Theme) {
         Line::default(),
         help_section("CONTROL", theme),
         help_line("s", "send a named signal with JSON input", theme),
+        help_line("Q / U", "invoke a Workflow Query / Update handler", theme),
+        help_line("p", "pause or unpause the selected Workflow", theme),
+        help_line("R", "reset at a valid Workflow Task event boundary", theme),
         help_line("c", "request graceful workflow cancellation", theme),
         help_line("x", "terminate workflow immediately", theme),
+        Line::default(),
+        help_section("SCHEDULE CONTROL", theme),
+        help_line("/", "edit the Schedule visibility query", theme),
+        help_line("N / E", "create / safely edit a Schedule", theme),
+        help_line("p", "pause or unpause a Schedule", theme),
+        help_line("t / b", "trigger now / backfill a time range", theme),
+        help_line("d", "delete with exact Schedule ID confirmation", theme),
         Line::default(),
         help_line("q / ctrl-c", "quit", theme),
         help_line("? / esc", "close this help", theme),
@@ -989,6 +1217,28 @@ fn render_query(frame: &mut Frame<'_>, area: Rect, input: &TextInput, theme: The
         .borders(Borders::ALL)
         .border_style(theme.accent())
         .title(Span::styled(" Temporal visibility query ", theme.title()))
+        .title_bottom(
+            Line::from(" enter apply · esc cancel ")
+                .alignment(Alignment::Right)
+                .style(theme.muted()),
+        );
+    let horizontal_offset = input_horizontal_offset(input, popup.width.saturating_sub(2));
+    frame.render_widget(
+        Paragraph::new(input.value.as_str())
+            .scroll((0, horizontal_offset))
+            .block(block),
+        popup,
+    );
+    set_input_cursor(frame, popup, input, horizontal_offset);
+}
+
+fn render_schedule_query(frame: &mut Frame<'_>, area: Rect, input: &TextInput, theme: Theme) {
+    let popup = centered(area, 82, 5);
+    frame.render_widget(Clear, popup);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(theme.accent())
+        .title(Span::styled(" Schedule visibility query ", theme.title()))
         .title_bottom(
             Line::from(" enter apply · esc cancel ")
                 .alignment(Alignment::Right)
@@ -1372,7 +1622,7 @@ fn render_confirmation(
     let popup = centered(area, 80, 11);
     frame.render_widget(Clear, popup);
     let severity = match action {
-        ConfirmAction::Cancel => theme.warning(),
+        ConfirmAction::Cancel | ConfirmAction::Pause | ConfirmAction::Unpause => theme.warning(),
         ConfirmAction::Terminate => theme.error(),
     };
     let warning = match action {
@@ -1381,6 +1631,12 @@ fn render_confirmation(
         }
         ConfirmAction::Terminate => {
             "Termination is immediate. Workflow code cannot intercept or clean up."
+        }
+        ConfirmAction::Pause => {
+            "Pausing stops new Workflow Tasks until the execution is explicitly unpaused."
+        }
+        ConfirmAction::Unpause => {
+            "Unpausing allows the Workflow Execution to resume processing Workflow Tasks."
         }
     };
     let text = Text::from(vec![
@@ -1471,6 +1727,465 @@ fn render_signal(frame: &mut Frame<'_>, area: Rect, form: &SignalForm, theme: Th
         SignalField::Name => set_input_cursor(frame, fields[0], &form.name, name_offset),
         SignalField::Input => set_input_cursor(frame, fields[1], &form.input, input_offset),
     }
+}
+
+fn render_workflow_call(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    kind: WorkflowCallKind,
+    form: &WorkflowCallForm,
+    theme: Theme,
+) {
+    let popup = centered(area, 82, 10);
+    frame.render_widget(Clear, popup);
+    frame.render_widget(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(theme.accent())
+            .title(Span::styled(
+                format!(" Invoke Workflow {} ", kind.label()),
+                theme.title(),
+            ))
+            .title_bottom(
+                Line::from(" enter next/send · tab field · esc cancel ")
+                    .alignment(Alignment::Right)
+                    .style(theme.muted()),
+            ),
+        popup,
+    );
+    let inner = popup.inner(ratatui::layout::Margin {
+        vertical: 1,
+        horizontal: 2,
+    });
+    let fields = Layout::vertical([Constraint::Length(3), Constraint::Length(3)])
+        .spacing(1)
+        .split(inner);
+    let name_offset = render_form_input(
+        frame,
+        fields[0],
+        " Handler name ",
+        &form.name,
+        form.active_field == HandlerField::Name,
+        theme,
+    );
+    let input_offset = render_form_input(
+        frame,
+        fields[1],
+        " JSON arguments [] ",
+        &form.input,
+        form.active_field == HandlerField::Input,
+        theme,
+    );
+    match form.active_field {
+        HandlerField::Name => set_input_cursor(frame, fields[0], &form.name, name_offset),
+        HandlerField::Input => set_input_cursor(frame, fields[1], &form.input, input_offset),
+    }
+}
+
+fn render_workflow_call_result(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    kind: WorkflowCallKind,
+    result: &WorkflowCallResult,
+    scroll: u16,
+    theme: Theme,
+) {
+    let popup = centered(area, 104, area.height.saturating_sub(6).clamp(14, 38));
+    frame.render_widget(Clear, popup);
+    let mut lines = vec![inspector_value("Handler", &result.handler, theme)];
+    if let Some(update_id) = &result.update_id {
+        lines.push(inspector_value("Update ID", update_id, theme));
+    }
+    append_structured_fields(&mut lines, "RESULT", &result.fields, theme);
+    if result.fields.is_empty() && result.failure.is_none() {
+        lines.push(Line::from("Handler returned no payloads").style(theme.muted()));
+    }
+    if let Some(failure) = &result.failure {
+        lines.push(Line::default());
+        lines.push(inspector_section("FAILURE", theme));
+        append_failure(&mut lines, failure, 0, theme);
+    }
+    frame.render_widget(
+        Paragraph::new(Text::from(lines))
+            .scroll((scroll, 0))
+            .wrap(Wrap { trim: false })
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(if result.failure.is_some() {
+                        theme.error()
+                    } else {
+                        theme.accent()
+                    })
+                    .title(Span::styled(
+                        format!(" Workflow {} result ", kind.label()),
+                        theme.title(),
+                    ))
+                    .title_bottom(
+                        Line::from(" j/k or page up/down scroll · esc close ")
+                            .alignment(Alignment::Right)
+                            .style(theme.muted()),
+                    )
+                    .padding(Padding::horizontal(1)),
+            ),
+        popup,
+    );
+}
+
+fn render_reset(frame: &mut Frame<'_>, area: Rect, form: &ResetForm, theme: Theme) {
+    let popup = centered(area, 88, 15);
+    frame.render_widget(Clear, popup);
+    frame.render_widget(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(theme.error())
+            .title(Span::styled(" Reset Workflow Execution ", theme.error()))
+            .title_bottom(
+                Line::from(" enter next/reset · tab field · esc cancel ")
+                    .alignment(Alignment::Right)
+                    .style(theme.muted()),
+            ),
+        popup,
+    );
+    let inner = popup.inner(ratatui::layout::Margin {
+        vertical: 1,
+        horizontal: 2,
+    });
+    let areas = Layout::vertical([
+        Constraint::Length(3),
+        Constraint::Length(3),
+        Constraint::Min(2),
+    ])
+    .spacing(1)
+    .split(inner);
+    let event_offset = render_form_input(
+        frame,
+        areas[0],
+        " Workflow Task event ID ",
+        &form.event_id,
+        form.active_field == ResetField::EventId,
+        theme,
+    );
+    let confirmation_offset = render_form_input(
+        frame,
+        areas[1],
+        " Exact Workflow ID ",
+        &form.confirmation,
+        form.active_field == ResetField::Confirmation,
+        theme,
+    );
+    frame.render_widget(
+        Paragraph::new(
+            "Reset terminates the current run and starts a new run from a valid Workflow Task \
+             completed/failed/timed-out/started boundary.",
+        )
+        .style(theme.warning())
+        .wrap(Wrap { trim: true }),
+        areas[2],
+    );
+    match form.active_field {
+        ResetField::EventId => set_input_cursor(frame, areas[0], &form.event_id, event_offset),
+        ResetField::Confirmation => {
+            set_input_cursor(frame, areas[1], &form.confirmation, confirmation_offset);
+        }
+    }
+}
+
+fn render_schedule_create(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    form: &ScheduleCreateForm,
+    theme: Theme,
+) {
+    let popup = centered(area, 108, 20);
+    frame.render_widget(Clear, popup);
+    frame.render_widget(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(theme.accent())
+            .title(Span::styled(" Create Schedule ", theme.title()))
+            .title_bottom(
+                Line::from(" enter next/create · tab/backtab field · esc cancel ")
+                    .alignment(Alignment::Right)
+                    .style(theme.muted()),
+            ),
+        popup,
+    );
+    let inner = popup.inner(ratatui::layout::Margin {
+        vertical: 1,
+        horizontal: 2,
+    });
+    let columns = Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .spacing(1)
+        .split(inner);
+    let left = Layout::vertical([Constraint::Length(3); 4])
+        .spacing(1)
+        .split(columns[0]);
+    let right = Layout::vertical([Constraint::Length(3); 4])
+        .spacing(1)
+        .split(columns[1]);
+    let fields = [
+        (
+            ScheduleCreateField::ScheduleId,
+            left[0],
+            " Schedule ID ",
+            &form.schedule_id,
+        ),
+        (
+            ScheduleCreateField::WorkflowId,
+            right[0],
+            " Workflow ID ",
+            &form.workflow_id,
+        ),
+        (
+            ScheduleCreateField::WorkflowType,
+            left[1],
+            " Workflow type ",
+            &form.workflow_type,
+        ),
+        (
+            ScheduleCreateField::TaskQueue,
+            right[1],
+            " Task Queue ",
+            &form.task_queue,
+        ),
+        (
+            ScheduleCreateField::Expression,
+            left[2],
+            " Cron / @every expression ",
+            &form.expression,
+        ),
+        (
+            ScheduleCreateField::Timezone,
+            right[2],
+            " IANA timezone ",
+            &form.timezone,
+        ),
+        (
+            ScheduleCreateField::Input,
+            left[3],
+            " JSON arguments [] ",
+            &form.input,
+        ),
+        (ScheduleCreateField::Notes, right[3], " Notes ", &form.notes),
+    ];
+    for (field, field_area, label, input) in fields {
+        let offset = render_form_input(
+            frame,
+            field_area,
+            label,
+            input,
+            form.active_field == field,
+            theme,
+        );
+        if form.active_field == field {
+            set_input_cursor(frame, field_area, input, offset);
+        }
+    }
+}
+
+fn render_schedule_edit(frame: &mut Frame<'_>, area: Rect, form: &ScheduleEditForm, theme: Theme) {
+    let popup = centered(area, 90, 16);
+    frame.render_widget(Clear, popup);
+    frame.render_widget(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(theme.warning())
+            .title(Span::styled(
+                format!(" Edit Schedule {} ", form.schedule_id),
+                theme.title(),
+            ))
+            .title_bottom(
+                Line::from(" blank expression preserves timing · enter next/save · esc cancel ")
+                    .alignment(Alignment::Right)
+                    .style(theme.muted()),
+            ),
+        popup,
+    );
+    let inner = popup.inner(ratatui::layout::Margin {
+        vertical: 1,
+        horizontal: 2,
+    });
+    let areas = Layout::vertical([
+        Constraint::Length(3),
+        Constraint::Length(3),
+        Constraint::Length(3),
+    ])
+    .spacing(1)
+    .split(inner);
+    let fields = [
+        (
+            ScheduleEditField::Expression,
+            areas[0],
+            " Replacement cron / @every (blank preserves) ",
+            &form.expression,
+        ),
+        (
+            ScheduleEditField::Timezone,
+            areas[1],
+            " IANA timezone ",
+            &form.timezone,
+        ),
+        (ScheduleEditField::Notes, areas[2], " Notes ", &form.notes),
+    ];
+    for (field, field_area, label, input) in fields {
+        let offset = render_form_input(
+            frame,
+            field_area,
+            label,
+            input,
+            form.active_field == field,
+            theme,
+        );
+        if form.active_field == field {
+            set_input_cursor(frame, field_area, input, offset);
+        }
+    }
+}
+
+fn render_schedule_backfill(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    form: &ScheduleBackfillForm,
+    theme: Theme,
+) {
+    let popup = centered(area, 108, 12);
+    frame.render_widget(Clear, popup);
+    frame.render_widget(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(theme.error())
+            .title(Span::styled(
+                format!(" Backfill Schedule {} ", form.schedule_id),
+                theme.error(),
+            ))
+            .title_bottom(
+                Line::from(" RFC3339 bounds · exact Schedule ID · enter next/backfill ")
+                    .alignment(Alignment::Right)
+                    .style(theme.muted()),
+            ),
+        popup,
+    );
+    let inner = popup.inner(ratatui::layout::Margin {
+        vertical: 1,
+        horizontal: 2,
+    });
+    let rows = Layout::vertical([Constraint::Length(3), Constraint::Length(3)])
+        .spacing(1)
+        .split(inner);
+    let top = Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .spacing(1)
+        .split(rows[0]);
+    let bottom = Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .spacing(1)
+        .split(rows[1]);
+    let fields = [
+        (
+            ScheduleBackfillField::Start,
+            top[0],
+            " Start (exclusive) ",
+            &form.start_time,
+        ),
+        (
+            ScheduleBackfillField::End,
+            top[1],
+            " End (inclusive) ",
+            &form.end_time,
+        ),
+        (
+            ScheduleBackfillField::Overlap,
+            bottom[0],
+            " Overlap policy ",
+            &form.overlap_policy,
+        ),
+        (
+            ScheduleBackfillField::Confirmation,
+            bottom[1],
+            " Exact Schedule ID ",
+            &form.confirmation,
+        ),
+    ];
+    for (field, field_area, label, input) in fields {
+        let offset = render_form_input(
+            frame,
+            field_area,
+            label,
+            input,
+            form.active_field == field,
+            theme,
+        );
+        if form.active_field == field {
+            set_input_cursor(frame, field_area, input, offset);
+        }
+    }
+}
+
+fn render_schedule_confirmation(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    action: ScheduleConfirmAction,
+    schedule_id: &str,
+    input: &TextInput,
+    theme: Theme,
+) {
+    let popup = centered(area, 82, 11);
+    frame.render_widget(Clear, popup);
+    let severity = theme.error();
+    let warning = match action {
+        ScheduleConfirmAction::Trigger => {
+            "This starts the Schedule action now and may create a production Workflow Execution."
+        }
+        ScheduleConfirmAction::Delete => {
+            "Deletion is permanent. Existing Workflow Executions are not deleted."
+        }
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(severity)
+        .title(Span::styled(" Schedule confirmation ", severity))
+        .title_bottom(
+            Line::from(" type Schedule ID exactly · enter confirm · esc cancel ")
+                .alignment(Alignment::Right)
+                .style(theme.muted()),
+        );
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+    let areas = Layout::vertical([Constraint::Length(4), Constraint::Length(3)]).split(inner);
+    frame.render_widget(
+        Paragraph::new(Text::from(vec![
+            Line::from(vec![
+                Span::raw("Really "),
+                Span::styled(action.verb(), severity.add_modifier(Modifier::BOLD)),
+                Span::raw(" "),
+                Span::styled(schedule_id, theme.strong()),
+                Span::raw("?"),
+            ]),
+            Line::default(),
+            Line::from(warning).style(theme.muted()),
+        ]))
+        .wrap(Wrap { trim: true }),
+        areas[0],
+    );
+    let offset = render_form_input(frame, areas[1], " Schedule ID ", input, true, theme);
+    set_input_cursor(frame, areas[1], input, offset);
+}
+
+fn render_form_input(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    title: &'static str,
+    input: &TextInput,
+    active: bool,
+    theme: Theme,
+) -> u16 {
+    let offset = input_horizontal_offset(input, area.width.saturating_sub(2));
+    frame.render_widget(
+        Paragraph::new(input.value.as_str())
+            .scroll((0, offset))
+            .block(input_block(title, active, theme)),
+        area,
+    );
+    offset
 }
 
 fn input_block(title: &'static str, active: bool, theme: Theme) -> Block<'static> {
@@ -1713,10 +2428,10 @@ mod tests {
         app::{AppConfig, Overlay},
         model::{
             ClusterInfo, DeploymentVersion, DeploymentVersionSummary, HistoryEventSummary,
-            PollerSummary, StructuredField, TaskQueueStats, TaskQueueSummary, TaskQueueType,
-            WorkerDeploymentDetails, WorkerDeploymentSummary, WorkerDetails, WorkerSlots,
-            WorkerSummary, WorkflowCount, WorkflowCountGroup, WorkflowDetails, WorkflowKey,
-            WorkflowSummary,
+            PollerSummary, ScheduleActionResult, ScheduleDetails, ScheduleSummary, StructuredField,
+            TaskQueueStats, TaskQueueSummary, TaskQueueType, WorkerDeploymentDetails,
+            WorkerDeploymentSummary, WorkerDetails, WorkerSlots, WorkerSummary, WorkflowCallResult,
+            WorkflowCount, WorkflowCountGroup, WorkflowDetails, WorkflowKey, WorkflowSummary,
         },
     };
 
@@ -1969,6 +2684,92 @@ mod tests {
         assert!(deployments.contains("release-controller"));
         assert!(deployments.contains("DRAINED"));
         assert!(deployments.contains("COMPLETED"));
+    }
+
+    #[test]
+    fn renders_schedule_control_plane_and_workflow_call_results() {
+        let summary = ScheduleSummary {
+            schedule_id: "hourly-orders".to_string(),
+            paused: false,
+            notes: "production hourly run".to_string(),
+            workflow_type: "OrderWorkflow".to_string(),
+            next_action_time: Some(Utc.with_ymd_and_hms(2026, 7, 28, 12, 0, 0).unwrap()),
+            recent_action_time: None,
+            state_size_bytes: 2_048,
+        };
+        let mut app = sample_app();
+        app.view = View::Schedules;
+        app.schedules = vec![summary.clone()];
+        app.schedule_details = Some(ScheduleDetails {
+            summary,
+            workflow_id: "scheduled-order".to_string(),
+            task_queue: "orders".to_string(),
+            timing: vec!["every 1h".to_string()],
+            timezone: "UTC".to_string(),
+            overlap_policy: "SKIP".to_string(),
+            catchup_window: "1h".to_string(),
+            pause_on_failure: true,
+            keep_original_workflow_id: false,
+            limited_actions: false,
+            remaining_actions: 0,
+            action_count: 4,
+            missed_catchup_window: 0,
+            overlap_skipped: 1,
+            buffer_dropped: 0,
+            buffer_size: 0,
+            running_workflows: Vec::new(),
+            recent_actions: vec![ScheduleActionResult {
+                scheduled_time: None,
+                actual_time: Some(Utc.with_ymd_and_hms(2026, 7, 28, 11, 0, 0).unwrap()),
+                workflow_id: "scheduled-order-1".to_string(),
+                run_id: "run-schedule".to_string(),
+                workflow_status: "COMPLETED".to_string(),
+            }],
+            future_action_times: vec![Utc.with_ymd_and_hms(2026, 7, 28, 12, 0, 0).unwrap()],
+            create_time: None,
+            update_time: None,
+            input: vec![StructuredField {
+                name: "input".to_string(),
+                encoding: "json/plain".to_string(),
+                value: r#"{"region":"eu"}"#.to_string(),
+                size_bytes: 15,
+                redacted: false,
+            }],
+            memo: Vec::new(),
+            search_attributes: Vec::new(),
+        });
+        let schedule = rendered(&app, 150, 42);
+        assert!(schedule.contains("SCHEDULES"));
+        assert!(schedule.contains("hourly-orders"));
+        assert!(schedule.contains("every 1h"));
+        assert!(schedule.contains("RECENT ACTIONS"));
+
+        app.overlay = Some(Overlay::WorkflowCallResult {
+            kind: WorkflowCallKind::Update,
+            result: WorkflowCallResult {
+                handler: "approve".to_string(),
+                update_id: Some("update-1".to_string()),
+                fields: vec![StructuredField {
+                    name: "result".to_string(),
+                    encoding: "json/plain".to_string(),
+                    value: "true".to_string(),
+                    size_bytes: 4,
+                    redacted: false,
+                }],
+                failure: None,
+            },
+            scroll: 0,
+        });
+        let result = rendered(&app, 130, 36);
+        assert!(result.contains("Workflow Update result"));
+        assert!(result.contains("update-1"));
+        assert!(result.contains("true"));
+
+        app.overlay = Some(Overlay::ScheduleCreate(ScheduleCreateForm::default()));
+        let create = rendered(&app, 130, 36);
+        assert!(create.contains("Create Schedule"));
+        assert!(create.contains("Cron / @every"));
+        assert!(create.contains("JSON arguments []"));
     }
 
     #[test]

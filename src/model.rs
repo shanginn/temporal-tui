@@ -99,6 +99,15 @@ pub struct StructuredField {
     pub redacted: bool,
 }
 
+/// Decoded result returned by a Workflow Query or Update handler.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct WorkflowCallResult {
+    pub handler: String,
+    pub update_id: Option<String>,
+    pub fields: Vec<StructuredField>,
+    pub failure: Option<FailureSummary>,
+}
+
 /// Safe failure tree extracted from Temporal failure payloads.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct FailureSummary {
@@ -348,6 +357,96 @@ pub struct WorkerDeploymentDetails {
     pub manager_identity: String,
     pub last_modifier_identity: String,
     pub routing_update_state: String,
+}
+
+/// Lightweight Schedule row returned by visibility.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ScheduleSummary {
+    pub schedule_id: String,
+    pub paused: bool,
+    pub notes: String,
+    pub workflow_type: String,
+    pub next_action_time: Option<DateTime<Utc>>,
+    pub recent_action_time: Option<DateTime<Utc>>,
+    pub state_size_bytes: i64,
+}
+
+/// One cursor-addressable page of Schedules.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SchedulePage {
+    pub schedules: Vec<ScheduleSummary>,
+    pub next_page_token: Vec<u8>,
+}
+
+/// One recent action taken by a Schedule.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ScheduleActionResult {
+    pub scheduled_time: Option<DateTime<Utc>>,
+    pub actual_time: Option<DateTime<Utc>>,
+    pub workflow_id: String,
+    pub run_id: String,
+    pub workflow_status: String,
+}
+
+/// Full Schedule definition and runtime state.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ScheduleDetails {
+    pub summary: ScheduleSummary,
+    pub workflow_id: String,
+    pub task_queue: String,
+    pub timing: Vec<String>,
+    pub timezone: String,
+    pub overlap_policy: String,
+    pub catchup_window: String,
+    pub pause_on_failure: bool,
+    pub keep_original_workflow_id: bool,
+    pub limited_actions: bool,
+    pub remaining_actions: i64,
+    pub action_count: i64,
+    pub missed_catchup_window: i64,
+    pub overlap_skipped: i64,
+    pub buffer_dropped: i64,
+    pub buffer_size: i64,
+    pub running_workflows: Vec<WorkflowKey>,
+    pub recent_actions: Vec<ScheduleActionResult>,
+    pub future_action_times: Vec<DateTime<Utc>>,
+    pub create_time: Option<DateTime<Utc>>,
+    pub update_time: Option<DateTime<Utc>>,
+    pub input: Vec<StructuredField>,
+    pub memo: Vec<StructuredField>,
+    pub search_attributes: Vec<StructuredField>,
+}
+
+/// User-entered Schedule definition for a start-workflow action.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ScheduleCreateRequest {
+    pub schedule_id: String,
+    pub workflow_id: String,
+    pub workflow_type: String,
+    pub task_queue: String,
+    pub schedule_expression: String,
+    pub timezone: String,
+    pub arguments: Vec<serde_json::Value>,
+    pub paused: bool,
+    pub notes: String,
+}
+
+/// Safe partial Schedule update.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScheduleUpdateRequest {
+    /// `None` preserves the current timing specification.
+    pub schedule_expression: Option<String>,
+    /// `None` preserves the current timezone.
+    pub timezone: Option<String>,
+    pub notes: String,
+}
+
+/// Inclusive Schedule backfill bounds entered as absolute timestamps.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScheduleBackfillRequest {
+    pub start_time: DateTime<Utc>,
+    pub end_time: DateTime<Utc>,
+    pub overlap_policy: String,
 }
 
 #[cfg(test)]

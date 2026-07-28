@@ -3,14 +3,17 @@ use std::{
     time::{Duration, Instant},
 };
 
+use chrono::Utc;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use serde_json::Value;
 use url::Url;
 
 use crate::model::{
-    ClusterInfo, HistoryPage, NamespaceSummary, TaskQueueSummary, WorkerDeploymentDetails,
-    WorkerDeploymentPage, WorkerDeploymentSummary, WorkerDetails, WorkerPage, WorkerSummary,
-    WorkflowCount, WorkflowDetails, WorkflowKey, WorkflowPage, WorkflowSummary,
+    ClusterInfo, HistoryPage, NamespaceSummary, ScheduleBackfillRequest, ScheduleCreateRequest,
+    ScheduleDetails, SchedulePage, ScheduleSummary, ScheduleUpdateRequest, TaskQueueSummary,
+    WorkerDeploymentDetails, WorkerDeploymentPage, WorkerDeploymentSummary, WorkerDetails,
+    WorkerPage, WorkerSummary, WorkflowCallResult, WorkflowCount, WorkflowDetails, WorkflowKey,
+    WorkflowPage, WorkflowStatus, WorkflowSummary,
 };
 
 /// Named visibility query loaded from the local config.
@@ -55,6 +58,7 @@ pub enum View {
     TaskQueues,
     Workers,
     Deployments,
+    Schedules,
 }
 
 impl View {
@@ -65,6 +69,7 @@ impl View {
             Self::TaskQueues => 2,
             Self::Workers => 3,
             Self::Deployments => 4,
+            Self::Schedules => 5,
         }
     }
 
@@ -75,6 +80,7 @@ impl View {
             Self::TaskQueues => "TASK QUEUES",
             Self::Workers => "WORKERS",
             Self::Deployments => "DEPLOYMENTS",
+            Self::Schedules => "SCHEDULES",
         }
     }
 }
@@ -100,6 +106,8 @@ pub struct Notice {
 pub enum ConfirmAction {
     Cancel,
     Terminate,
+    Pause,
+    Unpause,
 }
 
 impl ConfirmAction {
@@ -108,6 +116,42 @@ impl ConfirmAction {
         match self {
             Self::Cancel => "request cancellation of",
             Self::Terminate => "terminate",
+            Self::Pause => "pause",
+            Self::Unpause => "unpause",
+        }
+    }
+}
+
+/// Workflow handler invocation type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkflowCallKind {
+    Query,
+    Update,
+}
+
+impl WorkflowCallKind {
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Query => "Query",
+            Self::Update => "Update",
+        }
+    }
+}
+
+/// Schedule action requiring an exact-ID confirmation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScheduleConfirmAction {
+    Trigger,
+    Delete,
+}
+
+impl ScheduleConfirmAction {
+    #[must_use]
+    pub const fn verb(self) -> &'static str {
+        match self {
+            Self::Trigger => "trigger immediately",
+            Self::Delete => "delete permanently",
         }
     }
 }
@@ -117,6 +161,7 @@ impl ConfirmAction {
 pub enum Overlay {
     Help,
     Query(TextInput),
+    ScheduleQuery(TextInput),
     TaskQueue(TextInput),
     SavedQueryPicker {
         selected: usize,
@@ -134,6 +179,24 @@ pub enum Overlay {
         input: TextInput,
     },
     Signal(SignalForm),
+    WorkflowCall {
+        kind: WorkflowCallKind,
+        form: WorkflowCallForm,
+    },
+    WorkflowCallResult {
+        kind: WorkflowCallKind,
+        result: WorkflowCallResult,
+        scroll: u16,
+    },
+    Reset(ResetForm),
+    ScheduleCreate(ScheduleCreateForm),
+    ScheduleEdit(ScheduleEditForm),
+    ScheduleBackfill(ScheduleBackfillForm),
+    ScheduleConfirm {
+        action: ScheduleConfirmAction,
+        schedule_id: String,
+        input: TextInput,
+    },
     WorkflowChain {
         selected: usize,
     },
@@ -223,6 +286,150 @@ pub enum SignalField {
     Input,
 }
 
+/// Query/Update form data.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkflowCallForm {
+    pub name: TextInput,
+    pub input: TextInput,
+    pub active_field: HandlerField,
+}
+
+impl Default for WorkflowCallForm {
+    fn default() -> Self {
+        Self {
+            name: TextInput::default(),
+            input: TextInput::new("[]"),
+            active_field: HandlerField::Name,
+        }
+    }
+}
+
+/// Active Query/Update form field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HandlerField {
+    Name,
+    Input,
+}
+
+/// Reset form requiring both an event boundary and an exact Workflow ID.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResetForm {
+    pub key: WorkflowKey,
+    pub workflow_id: String,
+    pub event_id: TextInput,
+    pub confirmation: TextInput,
+    pub active_field: ResetField,
+}
+
+/// Active reset form field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResetField {
+    EventId,
+    Confirmation,
+}
+
+/// Create-Schedule form.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScheduleCreateForm {
+    pub schedule_id: TextInput,
+    pub workflow_id: TextInput,
+    pub workflow_type: TextInput,
+    pub task_queue: TextInput,
+    pub expression: TextInput,
+    pub timezone: TextInput,
+    pub input: TextInput,
+    pub notes: TextInput,
+    pub active_field: ScheduleCreateField,
+}
+
+impl Default for ScheduleCreateForm {
+    fn default() -> Self {
+        Self {
+            schedule_id: TextInput::default(),
+            workflow_id: TextInput::default(),
+            workflow_type: TextInput::default(),
+            task_queue: TextInput::default(),
+            expression: TextInput::new("@every 1h"),
+            timezone: TextInput::new("UTC"),
+            input: TextInput::new("[]"),
+            notes: TextInput::new("Created from temporal-tui"),
+            active_field: ScheduleCreateField::ScheduleId,
+        }
+    }
+}
+
+/// Active create-Schedule field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScheduleCreateField {
+    ScheduleId,
+    WorkflowId,
+    WorkflowType,
+    TaskQueue,
+    Expression,
+    Timezone,
+    Input,
+    Notes,
+}
+
+impl ScheduleCreateField {
+    const ALL: [Self; 8] = [
+        Self::ScheduleId,
+        Self::WorkflowId,
+        Self::WorkflowType,
+        Self::TaskQueue,
+        Self::Expression,
+        Self::Timezone,
+        Self::Input,
+        Self::Notes,
+    ];
+}
+
+/// Edit-Schedule form. A blank expression preserves the current timing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScheduleEditForm {
+    pub schedule_id: String,
+    pub expression: TextInput,
+    pub timezone: TextInput,
+    pub notes: TextInput,
+    pub active_field: ScheduleEditField,
+}
+
+/// Active edit-Schedule field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScheduleEditField {
+    Expression,
+    Timezone,
+    Notes,
+}
+
+impl ScheduleEditField {
+    const ALL: [Self; 3] = [Self::Expression, Self::Timezone, Self::Notes];
+}
+
+/// Schedule backfill form with an exact-ID safety check.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScheduleBackfillForm {
+    pub schedule_id: String,
+    pub start_time: TextInput,
+    pub end_time: TextInput,
+    pub overlap_policy: TextInput,
+    pub confirmation: TextInput,
+    pub active_field: ScheduleBackfillField,
+}
+
+/// Active Schedule backfill field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScheduleBackfillField {
+    Start,
+    End,
+    Overlap,
+    Confirmation,
+}
+
+impl ScheduleBackfillField {
+    const ALL: [Self; 4] = [Self::Start, Self::End, Self::Overlap, Self::Confirmation];
+}
+
 /// Side effects requested by the pure application state machine.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Command {
@@ -286,6 +493,51 @@ pub enum Command {
         namespace: String,
         name: String,
     },
+    LoadSchedules {
+        request_id: u64,
+        namespace: String,
+        query: String,
+        page_size: usize,
+        next_page_token: Vec<u8>,
+    },
+    LoadScheduleDetails {
+        request_id: u64,
+        namespace: String,
+        schedule_id: String,
+    },
+    QueryWorkflow {
+        request_id: u64,
+        namespace: String,
+        key: WorkflowKey,
+        query_name: String,
+        arguments: Vec<Value>,
+    },
+    UpdateWorkflow {
+        request_id: u64,
+        namespace: String,
+        key: WorkflowKey,
+        update_name: String,
+        arguments: Vec<Value>,
+    },
+    PauseWorkflow {
+        request_id: u64,
+        namespace: String,
+        key: WorkflowKey,
+        reason: String,
+    },
+    UnpauseWorkflow {
+        request_id: u64,
+        namespace: String,
+        key: WorkflowKey,
+        reason: String,
+    },
+    ResetWorkflow {
+        request_id: u64,
+        namespace: String,
+        key: WorkflowKey,
+        event_id: i64,
+        reason: String,
+    },
     Cancel {
         request_id: u64,
         namespace: String,
@@ -304,6 +556,45 @@ pub enum Command {
         key: WorkflowKey,
         signal_name: String,
         input: Value,
+    },
+    CreateSchedule {
+        request_id: u64,
+        namespace: String,
+        request: ScheduleCreateRequest,
+    },
+    UpdateSchedule {
+        request_id: u64,
+        namespace: String,
+        schedule_id: String,
+        request: ScheduleUpdateRequest,
+    },
+    PauseSchedule {
+        request_id: u64,
+        namespace: String,
+        schedule_id: String,
+        note: String,
+    },
+    UnpauseSchedule {
+        request_id: u64,
+        namespace: String,
+        schedule_id: String,
+        note: String,
+    },
+    TriggerSchedule {
+        request_id: u64,
+        namespace: String,
+        schedule_id: String,
+    },
+    BackfillSchedule {
+        request_id: u64,
+        namespace: String,
+        schedule_id: String,
+        request: ScheduleBackfillRequest,
+    },
+    DeleteSchedule {
+        request_id: u64,
+        namespace: String,
+        schedule_id: String,
     },
     Copy {
         request_id: u64,
@@ -369,6 +660,23 @@ pub enum Message {
         request_id: u64,
         result: Result<Box<WorkerDeploymentDetails>, String>,
     },
+    SchedulesLoaded {
+        request_id: u64,
+        result: Result<SchedulePage, String>,
+    },
+    ScheduleDetailsLoaded {
+        request_id: u64,
+        result: Result<Box<ScheduleDetails>, String>,
+    },
+    WorkflowCallFinished {
+        request_id: u64,
+        kind: WorkflowCallKind,
+        result: Result<WorkflowCallResult, String>,
+    },
+    ResetFinished {
+        request_id: u64,
+        result: Result<String, String>,
+    },
     OperationFinished {
         request_id: u64,
         operation: OperationKind,
@@ -395,6 +703,15 @@ pub enum OperationKind {
     Cancel,
     Terminate,
     Signal,
+    PauseWorkflow,
+    UnpauseWorkflow,
+    CreateSchedule,
+    UpdateSchedule,
+    PauseSchedule,
+    UnpauseSchedule,
+    TriggerSchedule,
+    BackfillSchedule,
+    DeleteSchedule,
 }
 
 impl OperationKind {
@@ -403,7 +720,29 @@ impl OperationKind {
             Self::Cancel => "Cancellation requested",
             Self::Terminate => "Workflow terminated",
             Self::Signal => "Signal delivered",
+            Self::PauseWorkflow => "Workflow paused",
+            Self::UnpauseWorkflow => "Workflow unpaused",
+            Self::CreateSchedule => "Schedule created",
+            Self::UpdateSchedule => "Schedule updated",
+            Self::PauseSchedule => "Schedule paused",
+            Self::UnpauseSchedule => "Schedule unpaused",
+            Self::TriggerSchedule => "Schedule triggered",
+            Self::BackfillSchedule => "Schedule backfill requested",
+            Self::DeleteSchedule => "Schedule deleted",
         }
+    }
+
+    const fn is_schedule(self) -> bool {
+        matches!(
+            self,
+            Self::CreateSchedule
+                | Self::UpdateSchedule
+                | Self::PauseSchedule
+                | Self::UnpauseSchedule
+                | Self::TriggerSchedule
+                | Self::BackfillSchedule
+                | Self::DeleteSchedule
+        )
     }
 }
 
@@ -453,6 +792,14 @@ pub struct App {
     pub deployment_page_number: usize,
     pub deployment_has_previous_page: bool,
     pub deployment_has_next_page: bool,
+    pub schedule_query: String,
+    pub schedules: Vec<ScheduleSummary>,
+    pub selected_schedule: usize,
+    pub schedule_details: Option<ScheduleDetails>,
+    pub schedules_error: Option<String>,
+    pub schedule_page_number: usize,
+    pub schedule_has_previous_page: bool,
+    pub schedule_has_next_page: bool,
     pub selected_event: usize,
     pub focus: Focus,
     pub overlay: Option<Overlay>,
@@ -466,6 +813,9 @@ pub struct App {
     pub loading_worker_details: bool,
     pub loading_worker_deployments: bool,
     pub loading_worker_deployment_details: bool,
+    pub loading_schedules: bool,
+    pub loading_schedule_details: bool,
+    pub call_in_flight: bool,
     pub operation_in_flight: bool,
     pub should_quit: bool,
     current_workflow_request: u64,
@@ -478,6 +828,9 @@ pub struct App {
     current_worker_details_request: u64,
     current_worker_deployments_request: u64,
     current_worker_deployment_details_request: u64,
+    current_schedules_request: u64,
+    current_schedule_details_request: u64,
+    current_call_request: u64,
     current_namespace_request: u64,
     current_operation_request: u64,
     current_utility_request: u64,
@@ -491,6 +844,9 @@ pub struct App {
     deployment_current_page_token: Vec<u8>,
     deployment_next_page_token: Vec<u8>,
     deployment_previous_page_tokens: Vec<Vec<u8>>,
+    schedule_current_page_token: Vec<u8>,
+    schedule_next_page_token: Vec<u8>,
+    schedule_previous_page_tokens: Vec<Vec<u8>>,
     manual_task_queue_names: BTreeSet<String>,
     last_refresh_started: Instant,
 }
@@ -539,6 +895,14 @@ impl App {
             deployment_page_number: 1,
             deployment_has_previous_page: false,
             deployment_has_next_page: false,
+            schedule_query: String::new(),
+            schedules: Vec::new(),
+            selected_schedule: 0,
+            schedule_details: None,
+            schedules_error: None,
+            schedule_page_number: 1,
+            schedule_has_previous_page: false,
+            schedule_has_next_page: false,
             selected_event: 0,
             focus: Focus::Workflows,
             overlay: None,
@@ -552,6 +916,9 @@ impl App {
             loading_worker_details: false,
             loading_worker_deployments: false,
             loading_worker_deployment_details: false,
+            loading_schedules: false,
+            loading_schedule_details: false,
+            call_in_flight: false,
             operation_in_flight: false,
             should_quit: false,
             current_workflow_request: 0,
@@ -564,6 +931,9 @@ impl App {
             current_worker_details_request: 0,
             current_worker_deployments_request: 0,
             current_worker_deployment_details_request: 0,
+            current_schedules_request: 0,
+            current_schedule_details_request: 0,
+            current_call_request: 0,
             current_namespace_request: 0,
             current_operation_request: 0,
             current_utility_request: 0,
@@ -577,6 +947,9 @@ impl App {
             deployment_current_page_token: Vec::new(),
             deployment_next_page_token: Vec::new(),
             deployment_previous_page_tokens: Vec::new(),
+            schedule_current_page_token: Vec::new(),
+            schedule_next_page_token: Vec::new(),
+            schedule_previous_page_tokens: Vec::new(),
             manual_task_queue_names: BTreeSet::new(),
             last_refresh_started: Instant::now(),
         }
@@ -851,6 +1224,101 @@ impl App {
                 }
                 Vec::new()
             }
+            Message::SchedulesLoaded { request_id, result } => {
+                if request_id != self.current_schedules_request {
+                    return Vec::new();
+                }
+                self.loading_schedules = false;
+                match result {
+                    Ok(page) => {
+                        let previous = self
+                            .schedules
+                            .get(self.selected_schedule)
+                            .map(|schedule| schedule.schedule_id.clone());
+                        self.schedule_next_page_token = page.next_page_token;
+                        self.schedule_has_previous_page =
+                            !self.schedule_previous_page_tokens.is_empty();
+                        self.schedule_has_next_page = !self.schedule_next_page_token.is_empty();
+                        self.schedule_page_number = self.schedule_previous_page_tokens.len() + 1;
+                        self.schedules = page.schedules;
+                        self.selected_schedule = previous
+                            .and_then(|id| {
+                                self.schedules
+                                    .iter()
+                                    .position(|schedule| schedule.schedule_id == id)
+                            })
+                            .unwrap_or(0)
+                            .min(self.schedules.len().saturating_sub(1));
+                        self.schedule_details = None;
+                        self.schedules_error = None;
+                        self.load_selected_schedule_details().into_iter().collect()
+                    }
+                    Err(error) => {
+                        self.schedules_error = Some(error.clone());
+                        self.show_notice(error, NoticeKind::Error);
+                        Vec::new()
+                    }
+                }
+            }
+            Message::ScheduleDetailsLoaded { request_id, result } => {
+                if request_id != self.current_schedule_details_request {
+                    return Vec::new();
+                }
+                self.loading_schedule_details = false;
+                match result {
+                    Ok(details) => self.schedule_details = Some(*details),
+                    Err(error) => self.show_notice(error, NoticeKind::Error),
+                }
+                Vec::new()
+            }
+            Message::WorkflowCallFinished {
+                request_id,
+                kind,
+                result,
+            } => {
+                if request_id != self.current_call_request {
+                    return Vec::new();
+                }
+                self.call_in_flight = false;
+                self.operation_in_flight = false;
+                match result {
+                    Ok(result) => {
+                        self.overlay = Some(Overlay::WorkflowCallResult {
+                            kind,
+                            result,
+                            scroll: 0,
+                        });
+                        if kind == WorkflowCallKind::Update {
+                            self.refresh_workflows(false)
+                        } else {
+                            Vec::new()
+                        }
+                    }
+                    Err(error) => {
+                        self.show_notice(error, NoticeKind::Error);
+                        Vec::new()
+                    }
+                }
+            }
+            Message::ResetFinished { request_id, result } => {
+                if request_id != self.current_operation_request {
+                    return Vec::new();
+                }
+                self.operation_in_flight = false;
+                match result {
+                    Ok(run_id) => {
+                        self.show_notice(
+                            format!("Workflow reset into run {run_id}"),
+                            NoticeKind::Success,
+                        );
+                        self.refresh_workflows(false)
+                    }
+                    Err(error) => {
+                        self.show_notice(error, NoticeKind::Error);
+                        Vec::new()
+                    }
+                }
+            }
             Message::OperationFinished {
                 request_id,
                 operation,
@@ -863,7 +1331,11 @@ impl App {
                 match result {
                     Ok(()) => {
                         self.show_notice(operation.success_message(), NoticeKind::Success);
-                        self.refresh_workflows(false)
+                        if operation.is_schedule() {
+                            self.refresh_schedules(false)
+                        } else {
+                            self.refresh_workflows(false)
+                        }
                     }
                     Err(error) => {
                         self.show_notice(error, NoticeKind::Error);
@@ -934,8 +1406,14 @@ impl App {
             KeyCode::Char('2') => return self.switch_view(View::TaskQueues),
             KeyCode::Char('3') => return self.switch_view(View::Workers),
             KeyCode::Char('4') => return self.switch_view(View::Deployments),
+            KeyCode::Char('5') => return self.switch_view(View::Schedules),
             KeyCode::Char('/') if self.view == View::Workflows => {
                 self.overlay = Some(Overlay::Query(TextInput::new(self.query.clone())));
+            }
+            KeyCode::Char('/') if self.view == View::Schedules => {
+                self.overlay = Some(Overlay::ScheduleQuery(TextInput::new(
+                    self.schedule_query.clone(),
+                )));
             }
             KeyCode::Char('/') if self.view == View::TaskQueues => {
                 self.overlay = Some(Overlay::TaskQueue(TextInput::default()));
@@ -987,6 +1465,26 @@ impl App {
                 self.open_confirmation(ConfirmAction::Terminate);
             }
             KeyCode::Char('s') if self.view == View::Workflows => self.open_signal(),
+            KeyCode::Char('Q') if self.view == View::Workflows => {
+                self.open_workflow_call(WorkflowCallKind::Query);
+            }
+            KeyCode::Char('U') if self.view == View::Workflows => {
+                self.open_workflow_call(WorkflowCallKind::Update);
+            }
+            KeyCode::Char('p') if self.view == View::Workflows => self.open_pause_toggle(),
+            KeyCode::Char('R') if self.view == View::Workflows => self.open_reset(),
+            KeyCode::Char('N') if self.view == View::Schedules => self.open_schedule_create(),
+            KeyCode::Char('E') if self.view == View::Schedules => self.open_schedule_edit(),
+            KeyCode::Char('p') if self.view == View::Schedules => {
+                return self.toggle_schedule_pause();
+            }
+            KeyCode::Char('t') if self.view == View::Schedules => {
+                self.open_schedule_confirmation(ScheduleConfirmAction::Trigger);
+            }
+            KeyCode::Char('b') if self.view == View::Schedules => self.open_schedule_backfill(),
+            KeyCode::Char('d') if self.view == View::Schedules => {
+                self.open_schedule_confirmation(ScheduleConfirmAction::Delete);
+            }
             KeyCode::Char('[') => return self.previous_page(),
             KeyCode::Char(']') => return self.next_page(),
             KeyCode::Char('H') if self.view == View::Workflows => {
@@ -1040,6 +1538,14 @@ impl App {
                 KeyCode::Enter => {
                     self.query = input.value.trim().to_string();
                     return self.refresh_workflows(true);
+                }
+                _ => edit_text(input, key),
+            },
+            Overlay::ScheduleQuery(input) => match key.code {
+                KeyCode::Esc => return Vec::new(),
+                KeyCode::Enter => {
+                    self.schedule_query = input.value.trim().to_string();
+                    return self.refresh_schedules(true);
                 }
                 _ => edit_text(input, key),
             },
@@ -1123,9 +1629,12 @@ impl App {
                         self.worker_details = None;
                         self.worker_deployments.clear();
                         self.worker_deployment_details = None;
+                        self.schedules.clear();
+                        self.schedule_details = None;
                         self.manual_task_queue_names.clear();
                         self.reset_worker_pagination();
                         self.reset_deployment_pagination();
+                        self.reset_schedule_pagination();
                         return self.refresh_current_view(true);
                     }
                     return Vec::new();
@@ -1164,6 +1673,18 @@ impl App {
                             reason,
                         },
                         ConfirmAction::Terminate => Command::Terminate {
+                            request_id,
+                            namespace: self.namespace.clone(),
+                            key: workflow_key.clone(),
+                            reason,
+                        },
+                        ConfirmAction::Pause => Command::PauseWorkflow {
+                            request_id,
+                            namespace: self.namespace.clone(),
+                            key: workflow_key.clone(),
+                            reason,
+                        },
+                        ConfirmAction::Unpause => Command::UnpauseWorkflow {
                             request_id,
                             namespace: self.namespace.clone(),
                             key: workflow_key.clone(),
@@ -1224,6 +1745,320 @@ impl App {
                     SignalField::Input => edit_text(&mut form.input, key),
                 },
             },
+            Overlay::WorkflowCall { kind, form } => match key.code {
+                KeyCode::Esc => return Vec::new(),
+                KeyCode::Tab | KeyCode::BackTab => {
+                    form.active_field = match form.active_field {
+                        HandlerField::Name => HandlerField::Input,
+                        HandlerField::Input => HandlerField::Name,
+                    };
+                }
+                KeyCode::Enter if form.active_field == HandlerField::Name => {
+                    form.active_field = HandlerField::Input;
+                }
+                KeyCode::Enter => {
+                    let name = form.name.value.trim().to_string();
+                    if name.is_empty() {
+                        self.show_notice(
+                            format!("{} handler name must not be empty", kind.label()),
+                            NoticeKind::Error,
+                        );
+                        self.overlay = Some(overlay);
+                        return Vec::new();
+                    }
+                    let arguments = match parse_json_arguments(&form.input.value) {
+                        Ok(arguments) => arguments,
+                        Err(error) => {
+                            self.show_notice(
+                                format!("{} arguments are invalid: {error}", kind.label()),
+                                NoticeKind::Error,
+                            );
+                            self.overlay = Some(overlay);
+                            return Vec::new();
+                        }
+                    };
+                    let Some(workflow_key) = self
+                        .selected_workflow()
+                        .map(|workflow| workflow.key.clone())
+                    else {
+                        return Vec::new();
+                    };
+                    let request_id = self.next_request_id();
+                    self.current_call_request = request_id;
+                    self.call_in_flight = true;
+                    if *kind == WorkflowCallKind::Update {
+                        self.operation_in_flight = true;
+                    }
+                    return vec![match kind {
+                        WorkflowCallKind::Query => Command::QueryWorkflow {
+                            request_id,
+                            namespace: self.namespace.clone(),
+                            key: workflow_key,
+                            query_name: name,
+                            arguments,
+                        },
+                        WorkflowCallKind::Update => Command::UpdateWorkflow {
+                            request_id,
+                            namespace: self.namespace.clone(),
+                            key: workflow_key,
+                            update_name: name,
+                            arguments,
+                        },
+                    }];
+                }
+                _ => match form.active_field {
+                    HandlerField::Name => edit_text(&mut form.name, key),
+                    HandlerField::Input => edit_text(&mut form.input, key),
+                },
+            },
+            Overlay::WorkflowCallResult { scroll, .. } => match key.code {
+                KeyCode::Esc | KeyCode::Char('q') => return Vec::new(),
+                KeyCode::Up | KeyCode::Char('k') => *scroll = scroll.saturating_sub(1),
+                KeyCode::Down | KeyCode::Char('j') => *scroll = scroll.saturating_add(1),
+                KeyCode::PageUp => *scroll = scroll.saturating_sub(10),
+                KeyCode::PageDown => *scroll = scroll.saturating_add(10),
+                KeyCode::Home | KeyCode::Char('g') => *scroll = 0,
+                _ => {}
+            },
+            Overlay::Reset(form) => match key.code {
+                KeyCode::Esc => return Vec::new(),
+                KeyCode::Tab | KeyCode::BackTab => {
+                    form.active_field = match form.active_field {
+                        ResetField::EventId => ResetField::Confirmation,
+                        ResetField::Confirmation => ResetField::EventId,
+                    };
+                }
+                KeyCode::Enter if form.active_field == ResetField::EventId => {
+                    form.active_field = ResetField::Confirmation;
+                }
+                KeyCode::Enter => {
+                    if form.confirmation.value != form.workflow_id {
+                        self.show_notice(
+                            "Confirmation must exactly match the Workflow ID",
+                            NoticeKind::Error,
+                        );
+                        self.overlay = Some(overlay);
+                        return Vec::new();
+                    }
+                    let event_id = match form.event_id.value.trim().parse::<i64>() {
+                        Ok(event_id) if event_id > 0 => event_id,
+                        _ => {
+                            self.show_notice(
+                                "Reset event ID must be a positive integer",
+                                NoticeKind::Error,
+                            );
+                            self.overlay = Some(overlay);
+                            return Vec::new();
+                        }
+                    };
+                    let request_id = self.next_request_id();
+                    self.current_operation_request = request_id;
+                    self.operation_in_flight = true;
+                    return vec![Command::ResetWorkflow {
+                        request_id,
+                        namespace: self.namespace.clone(),
+                        key: form.key.clone(),
+                        event_id,
+                        reason: "Requested from temporal-tui".to_string(),
+                    }];
+                }
+                _ => match form.active_field {
+                    ResetField::EventId => edit_text(&mut form.event_id, key),
+                    ResetField::Confirmation => edit_text(&mut form.confirmation, key),
+                },
+            },
+            Overlay::ScheduleCreate(form) => match key.code {
+                KeyCode::Esc => return Vec::new(),
+                KeyCode::Tab => {
+                    form.active_field = next_field(form.active_field, &ScheduleCreateField::ALL);
+                }
+                KeyCode::BackTab => {
+                    form.active_field =
+                        previous_field(form.active_field, &ScheduleCreateField::ALL);
+                }
+                KeyCode::Enter if form.active_field != ScheduleCreateField::Notes => {
+                    form.active_field = next_field(form.active_field, &ScheduleCreateField::ALL);
+                }
+                KeyCode::Enter => {
+                    let required = [
+                        ("Schedule ID", form.schedule_id.value.trim()),
+                        ("Workflow ID", form.workflow_id.value.trim()),
+                        ("Workflow type", form.workflow_type.value.trim()),
+                        ("Task Queue", form.task_queue.value.trim()),
+                        ("Schedule expression", form.expression.value.trim()),
+                    ];
+                    if let Some((label, _)) = required.iter().find(|(_, value)| value.is_empty()) {
+                        self.show_notice(format!("{label} must not be empty"), NoticeKind::Error);
+                        self.overlay = Some(overlay);
+                        return Vec::new();
+                    }
+                    let arguments = match parse_json_arguments(&form.input.value) {
+                        Ok(arguments) => arguments,
+                        Err(error) => {
+                            self.show_notice(
+                                format!("Schedule arguments are invalid: {error}"),
+                                NoticeKind::Error,
+                            );
+                            self.overlay = Some(overlay);
+                            return Vec::new();
+                        }
+                    };
+                    let request = ScheduleCreateRequest {
+                        schedule_id: form.schedule_id.value.trim().to_string(),
+                        workflow_id: form.workflow_id.value.trim().to_string(),
+                        workflow_type: form.workflow_type.value.trim().to_string(),
+                        task_queue: form.task_queue.value.trim().to_string(),
+                        schedule_expression: form.expression.value.trim().to_string(),
+                        timezone: form.timezone.value.trim().to_string(),
+                        arguments,
+                        paused: false,
+                        notes: form.notes.value.trim().to_string(),
+                    };
+                    let request_id = self.next_request_id();
+                    self.current_operation_request = request_id;
+                    self.operation_in_flight = true;
+                    return vec![Command::CreateSchedule {
+                        request_id,
+                        namespace: self.namespace.clone(),
+                        request,
+                    }];
+                }
+                _ => edit_schedule_create_field(form, key),
+            },
+            Overlay::ScheduleEdit(form) => match key.code {
+                KeyCode::Esc => return Vec::new(),
+                KeyCode::Tab => {
+                    form.active_field = next_field(form.active_field, &ScheduleEditField::ALL);
+                }
+                KeyCode::BackTab => {
+                    form.active_field = previous_field(form.active_field, &ScheduleEditField::ALL);
+                }
+                KeyCode::Enter if form.active_field != ScheduleEditField::Notes => {
+                    form.active_field = next_field(form.active_field, &ScheduleEditField::ALL);
+                }
+                KeyCode::Enter => {
+                    let expression = form.expression.value.trim();
+                    let timezone = form.timezone.value.trim();
+                    let request = ScheduleUpdateRequest {
+                        schedule_expression: (!expression.is_empty())
+                            .then(|| expression.to_string()),
+                        timezone: Some(timezone.to_string()),
+                        notes: form.notes.value.trim().to_string(),
+                    };
+                    let request_id = self.next_request_id();
+                    self.current_operation_request = request_id;
+                    self.operation_in_flight = true;
+                    return vec![Command::UpdateSchedule {
+                        request_id,
+                        namespace: self.namespace.clone(),
+                        schedule_id: form.schedule_id.clone(),
+                        request,
+                    }];
+                }
+                _ => edit_schedule_edit_field(form, key),
+            },
+            Overlay::ScheduleBackfill(form) => match key.code {
+                KeyCode::Esc => return Vec::new(),
+                KeyCode::Tab => {
+                    form.active_field = next_field(form.active_field, &ScheduleBackfillField::ALL);
+                }
+                KeyCode::BackTab => {
+                    form.active_field =
+                        previous_field(form.active_field, &ScheduleBackfillField::ALL);
+                }
+                KeyCode::Enter if form.active_field != ScheduleBackfillField::Confirmation => {
+                    form.active_field = next_field(form.active_field, &ScheduleBackfillField::ALL);
+                }
+                KeyCode::Enter => {
+                    if form.confirmation.value != form.schedule_id {
+                        self.show_notice(
+                            "Confirmation must exactly match the Schedule ID",
+                            NoticeKind::Error,
+                        );
+                        self.overlay = Some(overlay);
+                        return Vec::new();
+                    }
+                    let start_time =
+                        match chrono::DateTime::parse_from_rfc3339(form.start_time.value.trim()) {
+                            Ok(value) => value.with_timezone(&Utc),
+                            Err(error) => {
+                                self.show_notice(
+                                    format!("Backfill start time is invalid: {error}"),
+                                    NoticeKind::Error,
+                                );
+                                self.overlay = Some(overlay);
+                                return Vec::new();
+                            }
+                        };
+                    let end_time =
+                        match chrono::DateTime::parse_from_rfc3339(form.end_time.value.trim()) {
+                            Ok(value) => value.with_timezone(&Utc),
+                            Err(error) => {
+                                self.show_notice(
+                                    format!("Backfill end time is invalid: {error}"),
+                                    NoticeKind::Error,
+                                );
+                                self.overlay = Some(overlay);
+                                return Vec::new();
+                            }
+                        };
+                    if start_time >= end_time {
+                        self.show_notice(
+                            "Backfill start time must be before end time",
+                            NoticeKind::Error,
+                        );
+                        self.overlay = Some(overlay);
+                        return Vec::new();
+                    }
+                    let request_id = self.next_request_id();
+                    self.current_operation_request = request_id;
+                    self.operation_in_flight = true;
+                    return vec![Command::BackfillSchedule {
+                        request_id,
+                        namespace: self.namespace.clone(),
+                        schedule_id: form.schedule_id.clone(),
+                        request: ScheduleBackfillRequest {
+                            start_time,
+                            end_time,
+                            overlap_policy: form.overlap_policy.value.trim().to_string(),
+                        },
+                    }];
+                }
+                _ => edit_schedule_backfill_field(form, key),
+            },
+            Overlay::ScheduleConfirm {
+                action,
+                schedule_id,
+                input,
+            } => match key.code {
+                KeyCode::Esc => return Vec::new(),
+                KeyCode::Enter => {
+                    if input.value != *schedule_id {
+                        self.show_notice(
+                            "Confirmation must exactly match the Schedule ID",
+                            NoticeKind::Error,
+                        );
+                        self.overlay = Some(overlay);
+                        return Vec::new();
+                    }
+                    let request_id = self.next_request_id();
+                    self.current_operation_request = request_id;
+                    self.operation_in_flight = true;
+                    return vec![match action {
+                        ScheduleConfirmAction::Trigger => Command::TriggerSchedule {
+                            request_id,
+                            namespace: self.namespace.clone(),
+                            schedule_id: schedule_id.clone(),
+                        },
+                        ScheduleConfirmAction::Delete => Command::DeleteSchedule {
+                            request_id,
+                            namespace: self.namespace.clone(),
+                            schedule_id: schedule_id.clone(),
+                        },
+                    }];
+                }
+                _ => edit_text(input, key),
+            },
             Overlay::WorkflowChain { selected } => match key.code {
                 KeyCode::Esc | KeyCode::Char('q' | 'C') => return Vec::new(),
                 KeyCode::Up | KeyCode::Char('k') => {
@@ -1277,6 +2112,10 @@ impl App {
                 let next = self.selected_worker_deployment.saturating_sub(amount);
                 self.select_worker_deployment(next)
             }
+            View::Schedules => {
+                let next = self.selected_schedule.saturating_sub(amount);
+                self.select_schedule(next)
+            }
         }
     }
 
@@ -1312,6 +2151,11 @@ impl App {
                     .min(self.worker_deployments.len().saturating_sub(1));
                 self.select_worker_deployment(next)
             }
+            View::Schedules => {
+                let next =
+                    (self.selected_schedule + amount).min(self.schedules.len().saturating_sub(1));
+                self.select_schedule(next)
+            }
         }
     }
 
@@ -1330,6 +2174,7 @@ impl App {
             }
             View::Workers => self.select_worker(0),
             View::Deployments => self.select_worker_deployment(0),
+            View::Schedules => self.select_schedule(0),
         }
     }
 
@@ -1353,6 +2198,7 @@ impl App {
             View::Deployments => {
                 self.select_worker_deployment(self.worker_deployments.len().saturating_sub(1))
             }
+            View::Schedules => self.select_schedule(self.schedules.len().saturating_sub(1)),
         }
     }
 
@@ -1386,6 +2232,15 @@ impl App {
             .collect()
     }
 
+    fn select_schedule(&mut self, index: usize) -> Vec<Command> {
+        if self.schedules.is_empty() || index == self.selected_schedule {
+            return Vec::new();
+        }
+        self.selected_schedule = index;
+        self.schedule_details = None;
+        self.load_selected_schedule_details().into_iter().collect()
+    }
+
     fn open_confirmation(&mut self, action: ConfirmAction) {
         if self.read_only {
             self.show_notice("Read-only mode blocks workflow mutations", NoticeKind::Info);
@@ -1402,9 +2257,18 @@ impl App {
             self.show_notice("No workflow selected", NoticeKind::Info);
             return;
         };
-        if !workflow.status.is_running() {
+        let valid_status = match action {
+            ConfirmAction::Pause => workflow.status == WorkflowStatus::Running,
+            ConfirmAction::Unpause => workflow.status == WorkflowStatus::Paused,
+            ConfirmAction::Cancel | ConfirmAction::Terminate => workflow.status.is_running(),
+        };
+        if !valid_status {
             self.show_notice(
-                format!("{} workflows cannot be changed", workflow.status),
+                format!(
+                    "{} cannot be applied to a {} workflow",
+                    action.verb(),
+                    workflow.status
+                ),
                 NoticeKind::Info,
             );
             return;
@@ -1443,6 +2307,197 @@ impl App {
         self.overlay = Some(Overlay::Signal(SignalForm::default()));
     }
 
+    fn open_workflow_call(&mut self, kind: WorkflowCallKind) {
+        if self.call_in_flight {
+            self.show_notice(
+                "A workflow handler call is already in progress",
+                NoticeKind::Info,
+            );
+            return;
+        }
+        if kind == WorkflowCallKind::Update {
+            if self.read_only {
+                self.show_notice("Read-only mode blocks Workflow Updates", NoticeKind::Info);
+                return;
+            }
+            if self.operation_in_flight {
+                self.show_notice(
+                    "A workflow operation is already in progress",
+                    NoticeKind::Info,
+                );
+                return;
+            }
+            let Some(workflow) = self.selected_workflow() else {
+                self.show_notice("No workflow selected", NoticeKind::Info);
+                return;
+            };
+            if !workflow.status.is_running() {
+                self.show_notice(
+                    format!("{} workflows cannot receive Updates", workflow.status),
+                    NoticeKind::Info,
+                );
+                return;
+            }
+        } else if self.selected_workflow().is_none() {
+            self.show_notice("No workflow selected", NoticeKind::Info);
+            return;
+        }
+        self.overlay = Some(Overlay::WorkflowCall {
+            kind,
+            form: WorkflowCallForm::default(),
+        });
+    }
+
+    fn open_pause_toggle(&mut self) {
+        let Some(status) = self.selected_workflow().map(|workflow| workflow.status) else {
+            self.show_notice("No workflow selected", NoticeKind::Info);
+            return;
+        };
+        self.open_confirmation(if status == WorkflowStatus::Paused {
+            ConfirmAction::Unpause
+        } else {
+            ConfirmAction::Pause
+        });
+    }
+
+    fn open_reset(&mut self) {
+        if self.read_only {
+            self.show_notice("Read-only mode blocks Workflow Reset", NoticeKind::Info);
+            return;
+        }
+        if self.operation_in_flight {
+            self.show_notice(
+                "A workflow operation is already in progress",
+                NoticeKind::Info,
+            );
+            return;
+        }
+        let Some(workflow) = self.selected_workflow() else {
+            self.show_notice("No workflow selected", NoticeKind::Info);
+            return;
+        };
+        let event_id = self
+            .details
+            .as_ref()
+            .and_then(|details| details.events.get(self.selected_event))
+            .map_or_else(|| "1".to_string(), |event| event.event_id.to_string());
+        self.overlay = Some(Overlay::Reset(ResetForm {
+            key: workflow.key.clone(),
+            workflow_id: workflow.key.workflow_id.clone(),
+            event_id: TextInput::new(event_id),
+            confirmation: TextInput::default(),
+            active_field: ResetField::EventId,
+        }));
+    }
+
+    fn open_schedule_create(&mut self) {
+        if !self.schedule_mutation_available() {
+            return;
+        }
+        self.overlay = Some(Overlay::ScheduleCreate(ScheduleCreateForm::default()));
+    }
+
+    fn open_schedule_edit(&mut self) {
+        if !self.schedule_mutation_available() {
+            return;
+        }
+        let Some(details) = &self.schedule_details else {
+            self.show_notice("Schedule details are still loading", NoticeKind::Info);
+            return;
+        };
+        self.overlay = Some(Overlay::ScheduleEdit(ScheduleEditForm {
+            schedule_id: details.summary.schedule_id.clone(),
+            expression: TextInput::default(),
+            timezone: TextInput::new(details.timezone.clone()),
+            notes: TextInput::new(details.summary.notes.clone()),
+            active_field: ScheduleEditField::Expression,
+        }));
+    }
+
+    fn toggle_schedule_pause(&mut self) -> Vec<Command> {
+        if !self.schedule_mutation_available() {
+            return Vec::new();
+        }
+        let Some(schedule) = self.schedules.get(self.selected_schedule) else {
+            self.show_notice("No Schedule selected", NoticeKind::Info);
+            return Vec::new();
+        };
+        let schedule_id = schedule.schedule_id.clone();
+        let paused = schedule.paused;
+        let request_id = self.next_request_id();
+        self.current_operation_request = request_id;
+        self.operation_in_flight = true;
+        vec![if paused {
+            Command::UnpauseSchedule {
+                request_id,
+                namespace: self.namespace.clone(),
+                schedule_id,
+                note: "Unpaused from temporal-tui".to_string(),
+            }
+        } else {
+            Command::PauseSchedule {
+                request_id,
+                namespace: self.namespace.clone(),
+                schedule_id,
+                note: "Paused from temporal-tui".to_string(),
+            }
+        }]
+    }
+
+    fn open_schedule_confirmation(&mut self, action: ScheduleConfirmAction) {
+        if !self.schedule_mutation_available() {
+            return;
+        }
+        let Some(schedule) = self.schedules.get(self.selected_schedule) else {
+            self.show_notice("No Schedule selected", NoticeKind::Info);
+            return;
+        };
+        self.overlay = Some(Overlay::ScheduleConfirm {
+            action,
+            schedule_id: schedule.schedule_id.clone(),
+            input: TextInput::default(),
+        });
+    }
+
+    fn open_schedule_backfill(&mut self) {
+        if !self.schedule_mutation_available() {
+            return;
+        }
+        let Some(schedule_id) = self
+            .schedules
+            .get(self.selected_schedule)
+            .map(|schedule| schedule.schedule_id.clone())
+        else {
+            self.show_notice("No Schedule selected", NoticeKind::Info);
+            return;
+        };
+        let end = Utc::now();
+        let start = end - chrono::Duration::hours(1);
+        self.overlay = Some(Overlay::ScheduleBackfill(ScheduleBackfillForm {
+            schedule_id,
+            start_time: TextInput::new(start.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)),
+            end_time: TextInput::new(end.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)),
+            overlap_policy: TextInput::new("skip"),
+            confirmation: TextInput::default(),
+            active_field: ScheduleBackfillField::Start,
+        }));
+    }
+
+    fn schedule_mutation_available(&mut self) -> bool {
+        if self.read_only {
+            self.show_notice("Read-only mode blocks Schedule mutations", NoticeKind::Info);
+            return false;
+        }
+        if self.operation_in_flight {
+            self.show_notice(
+                "A control-plane operation is already in progress",
+                NoticeKind::Info,
+            );
+            return false;
+        }
+        true
+    }
+
     fn switch_view(&mut self, view: View) -> Vec<Command> {
         if self.view == view {
             return Vec::new();
@@ -1462,7 +2517,8 @@ impl App {
             View::Deployments if self.worker_deployments.is_empty() => {
                 self.refresh_worker_deployments(true)
             }
-            View::Workflows | View::Workers | View::Deployments => Vec::new(),
+            View::Schedules if self.schedules.is_empty() => self.refresh_schedules(true),
+            View::Workflows | View::Workers | View::Deployments | View::Schedules => Vec::new(),
         }
     }
 
@@ -1472,6 +2528,7 @@ impl App {
             View::TaskQueues => self.refresh_task_queues(),
             View::Workers => self.refresh_workers(reset_pagination),
             View::Deployments => self.refresh_worker_deployments(reset_pagination),
+            View::Schedules => self.refresh_schedules(reset_pagination),
         }
     }
 
@@ -1481,6 +2538,7 @@ impl App {
             View::TaskQueues => self.loading_task_queues,
             View::Workers => self.loading_workers,
             View::Deployments => self.loading_worker_deployments,
+            View::Schedules => self.loading_schedules,
         }
     }
 
@@ -1554,6 +2612,7 @@ impl App {
             View::Workflows => self.next_workflow_page(),
             View::Workers => self.next_worker_page(),
             View::Deployments => self.next_deployment_page(),
+            View::Schedules => self.next_schedule_page(),
             View::TaskQueues => {
                 self.show_notice("Task Queue diagnostics are not paginated", NoticeKind::Info);
                 Vec::new()
@@ -1566,6 +2625,7 @@ impl App {
             View::Workflows => self.previous_workflow_page(),
             View::Workers => self.previous_worker_page(),
             View::Deployments => self.previous_deployment_page(),
+            View::Schedules => self.previous_schedule_page(),
             View::TaskQueues => {
                 self.show_notice("Task Queue diagnostics are not paginated", NoticeKind::Info);
                 Vec::new()
@@ -1629,6 +2689,34 @@ impl App {
         self.refresh_worker_deployments(false)
     }
 
+    fn next_schedule_page(&mut self) -> Vec<Command> {
+        if self.loading_schedules {
+            self.show_notice("Schedule page is still loading", NoticeKind::Info);
+            return Vec::new();
+        }
+        if self.schedule_next_page_token.is_empty() {
+            self.show_notice("Already on the last Schedule page", NoticeKind::Info);
+            return Vec::new();
+        }
+        self.schedule_previous_page_tokens
+            .push(self.schedule_current_page_token.clone());
+        self.schedule_current_page_token = std::mem::take(&mut self.schedule_next_page_token);
+        self.refresh_schedules(false)
+    }
+
+    fn previous_schedule_page(&mut self) -> Vec<Command> {
+        if self.loading_schedules {
+            self.show_notice("Schedule page is still loading", NoticeKind::Info);
+            return Vec::new();
+        }
+        let Some(previous) = self.schedule_previous_page_tokens.pop() else {
+            self.show_notice("Already on the first Schedule page", NoticeKind::Info);
+            return Vec::new();
+        };
+        self.schedule_current_page_token = previous;
+        self.refresh_schedules(false)
+    }
+
     fn reset_worker_pagination(&mut self) {
         self.worker_current_page_token.clear();
         self.worker_next_page_token.clear();
@@ -1645,6 +2733,32 @@ impl App {
         self.deployment_page_number = 1;
         self.deployment_has_previous_page = false;
         self.deployment_has_next_page = false;
+    }
+
+    fn reset_schedule_pagination(&mut self) {
+        self.schedule_current_page_token.clear();
+        self.schedule_next_page_token.clear();
+        self.schedule_previous_page_tokens.clear();
+        self.schedule_page_number = 1;
+        self.schedule_has_previous_page = false;
+        self.schedule_has_next_page = false;
+    }
+
+    fn refresh_schedules(&mut self, reset_pagination: bool) -> Vec<Command> {
+        if reset_pagination {
+            self.reset_schedule_pagination();
+        }
+        let request_id = self.next_request_id();
+        self.current_schedules_request = request_id;
+        self.loading_schedules = true;
+        self.last_refresh_started = Instant::now();
+        vec![Command::LoadSchedules {
+            request_id,
+            namespace: self.namespace.clone(),
+            query: self.schedule_query.clone(),
+            page_size: self.page_size,
+            next_page_token: self.schedule_current_page_token.clone(),
+        }]
     }
 
     fn refresh_workflows(&mut self, reset_pagination: bool) -> Vec<Command> {
@@ -1850,6 +2964,22 @@ impl App {
         })
     }
 
+    fn load_selected_schedule_details(&mut self) -> Option<Command> {
+        let schedule_id = self
+            .schedules
+            .get(self.selected_schedule)?
+            .schedule_id
+            .clone();
+        let request_id = self.next_request_id();
+        self.current_schedule_details_request = request_id;
+        self.loading_schedule_details = true;
+        Some(Command::LoadScheduleDetails {
+            request_id,
+            namespace: self.namespace.clone(),
+            schedule_id,
+        })
+    }
+
     fn load_namespaces(&mut self) -> Command {
         let request_id = self.next_request_id();
         self.current_namespace_request = request_id;
@@ -1868,6 +2998,66 @@ impl App {
             expires_at: Instant::now() + Duration::from_secs(6),
         });
     }
+}
+
+fn next_field<Field: Copy + PartialEq>(current: Field, fields: &[Field]) -> Field {
+    let index = fields
+        .iter()
+        .position(|field| *field == current)
+        .unwrap_or_default();
+    fields[(index + 1) % fields.len()]
+}
+
+fn previous_field<Field: Copy + PartialEq>(current: Field, fields: &[Field]) -> Field {
+    let index = fields
+        .iter()
+        .position(|field| *field == current)
+        .unwrap_or_default();
+    fields[(index + fields.len() - 1) % fields.len()]
+}
+
+fn parse_json_arguments(input: &str) -> Result<Vec<Value>, String> {
+    match serde_json::from_str::<Value>(input) {
+        Ok(Value::Array(arguments)) => Ok(arguments),
+        Ok(_) => Err(
+            "expected a JSON array; use [] for no arguments or [value] for one argument"
+                .to_string(),
+        ),
+        Err(error) => Err(format!("invalid JSON: {error}")),
+    }
+}
+
+fn edit_schedule_create_field(form: &mut ScheduleCreateForm, key: KeyEvent) {
+    let input = match form.active_field {
+        ScheduleCreateField::ScheduleId => &mut form.schedule_id,
+        ScheduleCreateField::WorkflowId => &mut form.workflow_id,
+        ScheduleCreateField::WorkflowType => &mut form.workflow_type,
+        ScheduleCreateField::TaskQueue => &mut form.task_queue,
+        ScheduleCreateField::Expression => &mut form.expression,
+        ScheduleCreateField::Timezone => &mut form.timezone,
+        ScheduleCreateField::Input => &mut form.input,
+        ScheduleCreateField::Notes => &mut form.notes,
+    };
+    edit_text(input, key);
+}
+
+fn edit_schedule_edit_field(form: &mut ScheduleEditForm, key: KeyEvent) {
+    let input = match form.active_field {
+        ScheduleEditField::Expression => &mut form.expression,
+        ScheduleEditField::Timezone => &mut form.timezone,
+        ScheduleEditField::Notes => &mut form.notes,
+    };
+    edit_text(input, key);
+}
+
+fn edit_schedule_backfill_field(form: &mut ScheduleBackfillForm, key: KeyEvent) {
+    let input = match form.active_field {
+        ScheduleBackfillField::Start => &mut form.start_time,
+        ScheduleBackfillField::End => &mut form.end_time,
+        ScheduleBackfillField::Overlap => &mut form.overlap_policy,
+        ScheduleBackfillField::Confirmation => &mut form.confirmation,
+    };
+    edit_text(input, key);
 }
 
 fn edit_text(input: &mut TextInput, key: KeyEvent) {
@@ -1951,6 +3141,18 @@ mod tests {
             close_time: None,
             history_length: 10,
             history_size_bytes: 1000,
+        }
+    }
+
+    fn schedule(id: &str, paused: bool) -> ScheduleSummary {
+        ScheduleSummary {
+            schedule_id: id.to_string(),
+            paused,
+            notes: String::new(),
+            workflow_type: "OrderWorkflow".to_string(),
+            next_action_time: None,
+            recent_action_time: None,
+            state_size_bytes: 1_024,
         }
     }
 
@@ -2051,6 +3253,11 @@ mod tests {
         let commands = deployments.handle_key(key(KeyCode::Char('4')));
         assert_eq!(deployments.view, View::Deployments);
         assert!(matches!(commands[0], Command::LoadWorkerDeployments { .. }));
+
+        let mut schedules = app();
+        let commands = schedules.handle_key(key(KeyCode::Char('5')));
+        assert_eq!(schedules.view, View::Schedules);
+        assert!(matches!(commands[0], Command::LoadSchedules { .. }));
     }
 
     #[test]
@@ -2229,7 +3436,141 @@ mod tests {
         assert!(app.overlay.is_none());
         assert!(app.handle_key(key(KeyCode::Char('s'))).is_empty());
         assert!(app.overlay.is_none());
+        assert!(app.handle_key(key(KeyCode::Char('U'))).is_empty());
+        assert!(app.overlay.is_none());
+        assert!(app.handle_key(key(KeyCode::Char('R'))).is_empty());
+        assert!(app.overlay.is_none());
+        app.view = View::Schedules;
+        app.schedules = vec![schedule("hourly-orders", false)];
+        assert!(app.handle_key(key(KeyCode::Char('p'))).is_empty());
+        assert!(app.handle_key(key(KeyCode::Char('N'))).is_empty());
+        assert!(app.overlay.is_none());
         assert!(app.notice.is_some());
+    }
+
+    #[test]
+    fn workflow_query_and_update_forms_dispatch_typed_commands() {
+        let mut app = app();
+        app.workflows = vec![workflow("order-42", WorkflowStatus::Running)];
+        app.handle_key(key(KeyCode::Char('Q')));
+        for character in "state".chars() {
+            app.handle_key(key(KeyCode::Char(character)));
+        }
+        app.handle_key(key(KeyCode::Enter));
+        let commands = app.handle_key(key(KeyCode::Enter));
+        assert!(matches!(
+            &commands[0],
+            Command::QueryWorkflow {
+                query_name,
+                key,
+                arguments,
+                ..
+            } if query_name == "state" && key.workflow_id == "order-42" && arguments.is_empty()
+        ));
+
+        app.call_in_flight = false;
+        app.handle_key(key(KeyCode::Char('U')));
+        for character in "approve".chars() {
+            app.handle_key(key(KeyCode::Char(character)));
+        }
+        app.handle_key(key(KeyCode::Enter));
+        let commands = app.handle_key(key(KeyCode::Enter));
+        assert!(matches!(
+            &commands[0],
+            Command::UpdateWorkflow { update_name, .. } if update_name == "approve"
+        ));
+        assert!(app.operation_in_flight);
+    }
+
+    #[test]
+    fn reset_requires_exact_workflow_id_and_positive_event() {
+        let mut app = app();
+        app.workflows = vec![workflow("order-42", WorkflowStatus::Running)];
+        app.handle_key(key(KeyCode::Char('R')));
+        assert!(matches!(app.overlay, Some(Overlay::Reset(_))));
+        if let Some(Overlay::Reset(form)) = &mut app.overlay {
+            form.event_id = TextInput::new("7");
+            form.confirmation = TextInput::new("order-42");
+            form.active_field = ResetField::Confirmation;
+        }
+        let commands = app.handle_key(key(KeyCode::Enter));
+        assert!(matches!(
+            &commands[0],
+            Command::ResetWorkflow { event_id: 7, .. }
+        ));
+    }
+
+    #[test]
+    fn schedule_controls_use_cursor_pagination_and_exact_confirmation() {
+        let mut app = app();
+        app.view = View::Schedules;
+        app.schedules = vec![schedule("hourly-orders", false)];
+        app.schedule_next_page_token = vec![9];
+        let commands = app.handle_key(key(KeyCode::Char(']')));
+        assert!(matches!(
+            &commands[0],
+            Command::LoadSchedules {
+                next_page_token,
+                ..
+            } if next_page_token == &[9]
+        ));
+
+        app.loading_schedules = false;
+        app.schedule_current_page_token.clear();
+        app.schedule_next_page_token.clear();
+        app.operation_in_flight = false;
+        app.handle_key(key(KeyCode::Char('t')));
+        assert!(matches!(
+            app.overlay,
+            Some(Overlay::ScheduleConfirm {
+                action: ScheduleConfirmAction::Trigger,
+                ..
+            })
+        ));
+        for character in "hourly-orders".chars() {
+            app.handle_key(key(KeyCode::Char(character)));
+        }
+        let commands = app.handle_key(key(KeyCode::Enter));
+        assert!(matches!(
+            &commands[0],
+            Command::TriggerSchedule { schedule_id, .. } if schedule_id == "hourly-orders"
+        ));
+    }
+
+    #[test]
+    fn create_schedule_form_validates_and_dispatches_complete_definition() {
+        let mut app = app();
+        app.view = View::Schedules;
+        let form = ScheduleCreateForm {
+            schedule_id: TextInput::new("hourly-orders"),
+            workflow_id: TextInput::new("scheduled-order"),
+            workflow_type: TextInput::new("OrderWorkflow"),
+            task_queue: TextInput::new("orders"),
+            expression: TextInput::new("@every 1h"),
+            input: TextInput::new(r#"[{"region":"eu"}]"#),
+            active_field: ScheduleCreateField::Notes,
+            ..ScheduleCreateForm::default()
+        };
+        app.overlay = Some(Overlay::ScheduleCreate(form));
+        let commands = app.handle_key(key(KeyCode::Enter));
+        assert!(matches!(
+            &commands[0],
+            Command::CreateSchedule { request, .. }
+                if request.schedule_id == "hourly-orders"
+                    && request.schedule_expression == "@every 1h"
+                    && request.arguments[0]["region"] == "eu"
+        ));
+    }
+
+    #[test]
+    fn workflow_arguments_require_an_explicit_json_array() {
+        assert_eq!(parse_json_arguments("[]").unwrap(), Vec::<Value>::new());
+        assert_eq!(
+            parse_json_arguments(r#"[41, {"approved":true}]"#).unwrap(),
+            vec![serde_json::json!(41), serde_json::json!({"approved": true})]
+        );
+        assert!(parse_json_arguments(r#"{"not":"an argument list"}"#).is_err());
+        assert!(parse_json_arguments("[broken").is_err());
     }
 
     #[test]

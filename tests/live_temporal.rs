@@ -19,10 +19,49 @@ use std::{
 
 use base64::prelude::*;
 use temporal_tui::{
-    model::WorkflowStatus,
+    model::{
+        ScheduleBackfillRequest, ScheduleCreateRequest, ScheduleUpdateRequest, WorkflowKey,
+        WorkflowStatus,
+    },
     service::{GrpcTemporalService, PayloadCodecConfig, TemporalConnectionConfig, TemporalService},
 };
+use temporalio_client::{Client, ClientOptions, Connection, ConnectionOptions};
+use temporalio_common::worker::WorkerTaskTypes;
+use temporalio_macros::{workflow, workflow_methods};
+use temporalio_sdk::{
+    SyncWorkflowContext, Worker, WorkerOptions, WorkflowContext, WorkflowContextView,
+    WorkflowResult,
+};
+use temporalio_sdk_core::{CoreRuntime, RuntimeOptions};
 use tokio::time::sleep;
+
+#[workflow]
+#[derive(Default)]
+struct TemporalTuiControlWorkflow {
+    counter: i32,
+}
+
+#[workflow_methods]
+impl TemporalTuiControlWorkflow {
+    #[run]
+    async fn run(ctx: &mut WorkflowContext<Self>, initial: i32) -> WorkflowResult<i32> {
+        ctx.state_mut(|state| state.counter = initial);
+        ctx.wait_condition(|state| state.counter >= 1_000).await;
+        Ok(ctx.state(|state| state.counter))
+    }
+
+    #[query(name = "current")]
+    fn current(&self, _ctx: &WorkflowContextView) -> i32 {
+        self.counter
+    }
+
+    #[update(name = "set")]
+    fn set(&mut self, _ctx: &mut SyncWorkflowContext<Self>, value: i32) -> i32 {
+        let previous = self.counter;
+        self.counter = value;
+        previous
+    }
+}
 
 struct DevServer {
     child: Child,
@@ -95,6 +134,11 @@ impl Drop for CodecServer {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires the project-local Temporal CLI"]
 async fn live_dashboard_and_control_operations() {
+    Box::pin(tokio::task::LocalSet::new().run_until(run_live_dashboard_and_control_operations()))
+        .await;
+}
+
+async fn run_live_dashboard_and_control_operations() {
     let temporal_cli = temporal_cli();
     assert!(
         temporal_cli.is_file(),
@@ -120,6 +164,140 @@ async fn live_dashboard_and_control_operations() {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
+    let control_workflow_id = format!("temporal-tui-control-{suffix}");
+    let control_task_queue = format!("temporal-tui-control-{suffix}");
+    let worker_runtime =
+        CoreRuntime::new_assume_tokio(RuntimeOptions::builder().build().expect("runtime options"))
+            .expect("Temporal Core runtime");
+    let worker_connection = Connection::connect(
+        ConnectionOptions::new(
+            url::Url::parse(&format!("http://{address}")).expect("worker address"),
+        )
+        .build(),
+    )
+    .await
+    .expect("worker connection");
+    let worker_client = Client::new(
+        worker_connection,
+        ClientOptions::new("default".to_string()).build(),
+    )
+    .expect("worker client");
+    let worker_options = WorkerOptions::new(control_task_queue.clone())
+        .register_workflow::<TemporalTuiControlWorkflow>()
+        .expect("register control Workflow")
+        .task_types(WorkerTaskTypes::workflow_only())
+        .build();
+    let mut worker =
+        Worker::new(&worker_runtime, worker_client, worker_options).expect("control Worker");
+    let shutdown_worker = worker.shutdown_handle();
+    let worker_task = tokio::task::spawn_local(async move { Box::pin(worker.run()).await });
+    start_control_workflow(
+        &temporal_cli,
+        &address,
+        &control_workflow_id,
+        &control_task_queue,
+    );
+
+    let control_query = format!("WorkflowId = '{control_workflow_id}'");
+    let control_workflow = eventually(Duration::from_secs(10), || async {
+        service
+            .list_workflows("default", &control_query, 10, Vec::new())
+            .await
+            .ok()
+            .and_then(|page| page.workflows.into_iter().next())
+            .filter(|workflow| workflow.status == WorkflowStatus::Running)
+    })
+    .await
+    .expect("control Workflow should be running");
+    let initial_query = service
+        .query_workflow("default", &control_workflow.key, "current", Vec::new())
+        .await
+        .expect("Workflow Query");
+    assert_eq!(initial_query.fields[0].value, "0");
+    let update = service
+        .update_workflow(
+            "default",
+            &control_workflow.key,
+            "set",
+            vec![serde_json::json!(41)],
+        )
+        .await
+        .expect("Workflow Update");
+    assert_eq!(update.fields[0].value, "0");
+    assert!(update.update_id.is_some());
+    let updated_query = service
+        .query_workflow("default", &control_workflow.key, "current", Vec::new())
+        .await
+        .expect("Query updated Workflow state");
+    assert_eq!(updated_query.fields[0].value, "41");
+
+    service
+        .pause_workflow("default", &control_workflow.key, "live contract pause")
+        .await
+        .expect("pause Workflow");
+    let paused = eventually(Duration::from_secs(10), || async {
+        service
+            .list_workflows("default", &control_query, 10, Vec::new())
+            .await
+            .ok()
+            .and_then(|page| page.workflows.into_iter().next())
+            .filter(|workflow| workflow.status == WorkflowStatus::Paused)
+    })
+    .await;
+    assert!(
+        paused.is_some(),
+        "Workflow should enter PAUSED visibility state"
+    );
+    service
+        .unpause_workflow("default", &control_workflow.key, "live contract unpause")
+        .await
+        .expect("unpause Workflow");
+
+    let control_details = eventually(Duration::from_secs(10), || async {
+        service
+            .describe_workflow("default", &control_workflow.key)
+            .await
+            .ok()
+            .filter(|details| {
+                details
+                    .events
+                    .iter()
+                    .any(|event| event.event_type == "WORKFLOW TASK COMPLETED")
+            })
+    })
+    .await
+    .expect("control Workflow should have a completed Workflow Task");
+    let reset_event_id = control_details
+        .events
+        .iter()
+        .find(|event| event.event_type == "WORKFLOW TASK COMPLETED")
+        .expect("reset boundary")
+        .event_id;
+    let reset_run_id = service
+        .reset_workflow(
+            "default",
+            &control_workflow.key,
+            reset_event_id,
+            "live contract reset",
+        )
+        .await
+        .expect("reset Workflow");
+    assert!(!reset_run_id.is_empty());
+    assert_ne!(reset_run_id, control_workflow.key.run_id);
+    let reset_key = WorkflowKey {
+        workflow_id: control_workflow_id.clone(),
+        run_id: reset_run_id,
+    };
+    let reset_query = eventually(Duration::from_secs(10), || async {
+        service
+            .query_workflow("default", &reset_key, "current", Vec::new())
+            .await
+            .ok()
+    })
+    .await
+    .expect("query reset Workflow");
+    assert_eq!(reset_query.fields[0].value, "0");
+
     let workflow_id = format!("temporal-tui-smoke-{suffix}");
     let second_workflow_id = format!("temporal-tui-smoke-{suffix}-second");
     start_smoke_workflow(&temporal_cli, &address, &workflow_id);
@@ -188,11 +366,25 @@ async fn live_dashboard_and_control_operations() {
             .any(|queue| queue.queue_type.label() == "ACTIVITY")
     );
 
-    let workers = service
-        .list_workers("default", "", 10, Vec::new())
-        .await
-        .expect("experimental Worker observability endpoint");
-    assert!(workers.workers.is_empty());
+    let workers = eventually(Duration::from_secs(10), || async {
+        service
+            .list_workers("default", "", 10, Vec::new())
+            .await
+            .ok()
+            .filter(|page| {
+                page.workers
+                    .iter()
+                    .any(|worker| worker.task_queue == control_task_queue)
+            })
+    })
+    .await
+    .expect("experimental Worker observability endpoint");
+    assert!(
+        workers
+            .workers
+            .iter()
+            .any(|worker| worker.task_queue == control_task_queue)
+    );
     assert!(workers.next_page_token.is_empty());
 
     let deployments = service
@@ -301,6 +493,214 @@ async fn live_dashboard_and_control_operations() {
             .fields
             .iter()
             .any(|field| { field.encoding == "json/plain" && field.value.contains("roundtrip") })
+    );
+
+    let schedule_id = format!("temporal-tui-schedule-{suffix}");
+    let second_schedule_id = format!("temporal-tui-schedule-{suffix}-second");
+    let scheduled_workflow_type = format!("TemporalTuiScheduledWorkflow{suffix}");
+    codec_service
+        .create_schedule(
+            "default",
+            ScheduleCreateRequest {
+                schedule_id: schedule_id.clone(),
+                workflow_id: format!("temporal-tui-scheduled-{suffix}"),
+                workflow_type: scheduled_workflow_type.clone(),
+                task_queue: "temporal-tui-scheduled".to_string(),
+                schedule_expression: "@every 1h".to_string(),
+                timezone: "UTC".to_string(),
+                arguments: vec![serde_json::json!({
+                    "codec_value":"scheduled-roundtrip"
+                })],
+                paused: false,
+                notes: "live contract".to_string(),
+            },
+        )
+        .await
+        .expect("create encoded Schedule");
+    service
+        .create_schedule(
+            "default",
+            ScheduleCreateRequest {
+                schedule_id: second_schedule_id.clone(),
+                workflow_id: format!("temporal-tui-scheduled-{suffix}-second"),
+                workflow_type: scheduled_workflow_type.clone(),
+                task_queue: "temporal-tui-scheduled".to_string(),
+                schedule_expression: "@every 1h".to_string(),
+                timezone: "UTC".to_string(),
+                arguments: vec![serde_json::json!({"source":"pagination"})],
+                paused: true,
+                notes: "second live contract Schedule".to_string(),
+            },
+        )
+        .await
+        .expect("create second Schedule");
+
+    let schedules = eventually(Duration::from_secs(10), || async {
+        service
+            .list_schedules("default", "", 100, Vec::new())
+            .await
+            .ok()
+            .filter(|page| {
+                page.schedules
+                    .iter()
+                    .any(|schedule| schedule.schedule_id == schedule_id)
+                    && page
+                        .schedules
+                        .iter()
+                        .any(|schedule| schedule.schedule_id == second_schedule_id)
+            })
+    })
+    .await
+    .expect("Schedules should appear in visibility");
+    assert!(schedules.schedules.len() >= 2);
+    let first_schedule_page = service
+        .list_schedules("default", "", 1, Vec::new())
+        .await
+        .expect("first Schedule cursor page");
+    assert_eq!(first_schedule_page.schedules.len(), 1);
+    assert!(!first_schedule_page.next_page_token.is_empty());
+    let second_schedule_page = service
+        .list_schedules("default", "", 1, first_schedule_page.next_page_token)
+        .await
+        .expect("second Schedule cursor page");
+    assert_eq!(second_schedule_page.schedules.len(), 1);
+    assert_ne!(
+        first_schedule_page.schedules[0].schedule_id,
+        second_schedule_page.schedules[0].schedule_id
+    );
+
+    let encoded_schedule = service
+        .describe_schedule("default", &schedule_id)
+        .await
+        .expect("describe encoded Schedule without Codec Server");
+    assert!(encoded_schedule.input.iter().any(|field| {
+        field.encoding == "binary/encrypted" && !field.value.contains("scheduled-roundtrip")
+    }));
+    let decoded_schedule = codec_service
+        .describe_schedule("default", &schedule_id)
+        .await
+        .expect("decode Schedule input through Codec Server");
+    assert!(decoded_schedule.input.iter().any(|field| {
+        field.encoding == "json/plain" && field.value.contains("scheduled-roundtrip")
+    }));
+
+    codec_service
+        .pause_schedule("default", &schedule_id, "live contract pause")
+        .await
+        .expect("pause Schedule");
+    let paused_schedule = eventually(Duration::from_secs(10), || async {
+        codec_service
+            .describe_schedule("default", &schedule_id)
+            .await
+            .ok()
+            .filter(|schedule| schedule.summary.paused)
+    })
+    .await;
+    assert!(paused_schedule.is_some(), "Schedule should be paused");
+    codec_service
+        .unpause_schedule("default", &schedule_id, "live contract unpause")
+        .await
+        .expect("unpause Schedule");
+    codec_service
+        .update_schedule(
+            "default",
+            &schedule_id,
+            ScheduleUpdateRequest {
+                schedule_expression: Some("@every 2h".to_string()),
+                timezone: Some("UTC".to_string()),
+                notes: "updated with conflict token".to_string(),
+            },
+        )
+        .await
+        .expect("update Schedule definition");
+    let updated_schedule = codec_service
+        .describe_schedule("default", &schedule_id)
+        .await
+        .expect("describe updated Schedule");
+    assert_eq!(
+        updated_schedule.summary.notes,
+        "updated with conflict token"
+    );
+    assert!(
+        updated_schedule
+            .timing
+            .iter()
+            .any(|timing| timing == "every 2h")
+    );
+    assert!(
+        updated_schedule
+            .input
+            .iter()
+            .any(|field| field.value.contains("scheduled-roundtrip")),
+        "Schedule update must preserve the encoded action input"
+    );
+
+    codec_service
+        .trigger_schedule("default", &schedule_id)
+        .await
+        .expect("trigger Schedule");
+    let triggered = eventually(Duration::from_secs(10), || async {
+        codec_service
+            .describe_schedule("default", &schedule_id)
+            .await
+            .ok()
+            .filter(|schedule| schedule.action_count >= 1)
+    })
+    .await;
+    assert!(
+        triggered.is_some(),
+        "Schedule trigger should record an action"
+    );
+    let backfill_end = chrono::Utc::now();
+    codec_service
+        .backfill_schedule(
+            "default",
+            &schedule_id,
+            ScheduleBackfillRequest {
+                start_time: backfill_end - chrono::Duration::hours(6),
+                end_time: backfill_end,
+                overlap_policy: "allow-all".to_string(),
+            },
+        )
+        .await
+        .expect("backfill Schedule");
+    let backfilled = eventually(Duration::from_secs(10), || async {
+        codec_service
+            .describe_schedule("default", &schedule_id)
+            .await
+            .ok()
+            .filter(|schedule| schedule.action_count >= 2)
+    })
+    .await;
+    assert!(
+        backfilled.is_some(),
+        "Schedule backfill should record additional actions"
+    );
+
+    codec_service
+        .delete_schedule("default", &schedule_id)
+        .await
+        .expect("delete Schedule");
+    service
+        .delete_schedule("default", &second_schedule_id)
+        .await
+        .expect("delete second Schedule");
+    let schedules_deleted = eventually(Duration::from_secs(10), || async {
+        service
+            .list_schedules("default", "", 100, Vec::new())
+            .await
+            .ok()
+            .filter(|page| {
+                !page.schedules.iter().any(|schedule| {
+                    schedule.schedule_id == schedule_id
+                        || schedule.schedule_id == second_schedule_id
+                })
+            })
+    })
+    .await;
+    assert!(
+        schedules_deleted.is_some(),
+        "deleted Schedules should disappear from visibility"
     );
 
     service
@@ -416,6 +816,40 @@ async fn live_dashboard_and_control_operations() {
         .terminate_workflow("default", &second.key, "live contract test cleanup")
         .await
         .expect("terminate second workflow");
+
+    service
+        .terminate_workflow("default", &reset_key, "live contract control cleanup")
+        .await
+        .expect("terminate reset control Workflow");
+    let scheduled_query = format!("WorkflowType = '{scheduled_workflow_type}'");
+    let scheduled_workflows = eventually(Duration::from_secs(10), || async {
+        service
+            .list_workflows("default", &scheduled_query, 100, Vec::new())
+            .await
+            .ok()
+            .filter(|page| !page.workflows.is_empty())
+    })
+    .await
+    .expect("Schedule-triggered Workflows should appear in visibility");
+    for scheduled_workflow in scheduled_workflows.workflows {
+        if scheduled_workflow.status.is_running() {
+            service
+                .terminate_workflow(
+                    "default",
+                    &scheduled_workflow.key,
+                    "live contract Schedule cleanup",
+                )
+                .await
+                .expect("terminate Schedule-triggered Workflow");
+        }
+    }
+
+    shutdown_worker();
+    let worker_result = tokio::time::timeout(Duration::from_secs(10), worker_task)
+        .await
+        .expect("control Worker shutdown timeout")
+        .expect("join control Worker");
+    worker_result.expect("control Worker result");
 }
 
 fn temporal_cli() -> PathBuf {
@@ -449,6 +883,8 @@ fn start_dev_server(temporal_cli: &PathBuf, port: u16) -> DevServer {
             "127.0.0.1",
             "--port",
             &port,
+            "--dynamic-config-value",
+            "frontend.WorkflowPauseEnabled=true",
             "--log-level",
             "error",
         ])
@@ -516,6 +952,35 @@ fn start_smoke_workflow(temporal_cli: &PathBuf, address: &str, workflow_id: &str
             "Temporal TUI live smoke test",
             "--input",
             r#"{"source":"temporal-tui"}"#,
+            "--output",
+            "none",
+        ],
+    );
+}
+
+fn start_control_workflow(
+    temporal_cli: &PathBuf,
+    address: &str,
+    workflow_id: &str,
+    task_queue: &str,
+) {
+    run_cli(
+        temporal_cli,
+        &[
+            "workflow",
+            "start",
+            "--address",
+            address,
+            "--namespace",
+            "default",
+            "--workflow-id",
+            workflow_id,
+            "--type",
+            "TemporalTuiControlWorkflow",
+            "--task-queue",
+            task_queue,
+            "--input",
+            "0",
             "--output",
             "none",
         ],

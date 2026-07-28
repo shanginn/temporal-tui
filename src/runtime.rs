@@ -250,6 +250,98 @@ async fn execute(command: Command, service: &dyn TemporalService) -> Message {
                 .map(Box::new)
                 .map_err(|error| error.to_string()),
         },
+        Command::LoadSchedules {
+            request_id,
+            namespace,
+            query,
+            page_size,
+            next_page_token,
+        } => Message::SchedulesLoaded {
+            request_id,
+            result: service
+                .list_schedules(&namespace, &query, page_size, next_page_token)
+                .await
+                .map_err(|error| error.to_string()),
+        },
+        Command::LoadScheduleDetails {
+            request_id,
+            namespace,
+            schedule_id,
+        } => Message::ScheduleDetailsLoaded {
+            request_id,
+            result: service
+                .describe_schedule(&namespace, &schedule_id)
+                .await
+                .map(Box::new)
+                .map_err(|error| error.to_string()),
+        },
+        Command::QueryWorkflow {
+            request_id,
+            namespace,
+            key,
+            query_name,
+            arguments,
+        } => Message::WorkflowCallFinished {
+            request_id,
+            kind: crate::app::WorkflowCallKind::Query,
+            result: service
+                .query_workflow(&namespace, &key, &query_name, arguments)
+                .await
+                .map_err(|error| error.to_string()),
+        },
+        Command::UpdateWorkflow {
+            request_id,
+            namespace,
+            key,
+            update_name,
+            arguments,
+        } => Message::WorkflowCallFinished {
+            request_id,
+            kind: crate::app::WorkflowCallKind::Update,
+            result: service
+                .update_workflow(&namespace, &key, &update_name, arguments)
+                .await
+                .map_err(|error| error.to_string()),
+        },
+        Command::PauseWorkflow {
+            request_id,
+            namespace,
+            key,
+            reason,
+        } => Message::OperationFinished {
+            request_id,
+            operation: OperationKind::PauseWorkflow,
+            result: service
+                .pause_workflow(&namespace, &key, &reason)
+                .await
+                .map_err(|error| error.to_string()),
+        },
+        Command::UnpauseWorkflow {
+            request_id,
+            namespace,
+            key,
+            reason,
+        } => Message::OperationFinished {
+            request_id,
+            operation: OperationKind::UnpauseWorkflow,
+            result: service
+                .unpause_workflow(&namespace, &key, &reason)
+                .await
+                .map_err(|error| error.to_string()),
+        },
+        Command::ResetWorkflow {
+            request_id,
+            namespace,
+            key,
+            event_id,
+            reason,
+        } => Message::ResetFinished {
+            request_id,
+            result: service
+                .reset_workflow(&namespace, &key, event_id, &reason)
+                .await
+                .map_err(|error| error.to_string()),
+        },
         Command::Cancel {
             request_id,
             namespace,
@@ -260,6 +352,94 @@ async fn execute(command: Command, service: &dyn TemporalService) -> Message {
             operation: OperationKind::Cancel,
             result: service
                 .cancel_workflow(&namespace, &key, &reason)
+                .await
+                .map_err(|error| error.to_string()),
+        },
+        Command::CreateSchedule {
+            request_id,
+            namespace,
+            request,
+        } => Message::OperationFinished {
+            request_id,
+            operation: OperationKind::CreateSchedule,
+            result: service
+                .create_schedule(&namespace, request)
+                .await
+                .map_err(|error| error.to_string()),
+        },
+        Command::UpdateSchedule {
+            request_id,
+            namespace,
+            schedule_id,
+            request,
+        } => Message::OperationFinished {
+            request_id,
+            operation: OperationKind::UpdateSchedule,
+            result: service
+                .update_schedule(&namespace, &schedule_id, request)
+                .await
+                .map_err(|error| error.to_string()),
+        },
+        Command::PauseSchedule {
+            request_id,
+            namespace,
+            schedule_id,
+            note,
+        } => Message::OperationFinished {
+            request_id,
+            operation: OperationKind::PauseSchedule,
+            result: service
+                .pause_schedule(&namespace, &schedule_id, &note)
+                .await
+                .map_err(|error| error.to_string()),
+        },
+        Command::UnpauseSchedule {
+            request_id,
+            namespace,
+            schedule_id,
+            note,
+        } => Message::OperationFinished {
+            request_id,
+            operation: OperationKind::UnpauseSchedule,
+            result: service
+                .unpause_schedule(&namespace, &schedule_id, &note)
+                .await
+                .map_err(|error| error.to_string()),
+        },
+        Command::TriggerSchedule {
+            request_id,
+            namespace,
+            schedule_id,
+        } => Message::OperationFinished {
+            request_id,
+            operation: OperationKind::TriggerSchedule,
+            result: service
+                .trigger_schedule(&namespace, &schedule_id)
+                .await
+                .map_err(|error| error.to_string()),
+        },
+        Command::BackfillSchedule {
+            request_id,
+            namespace,
+            schedule_id,
+            request,
+        } => Message::OperationFinished {
+            request_id,
+            operation: OperationKind::BackfillSchedule,
+            result: service
+                .backfill_schedule(&namespace, &schedule_id, request)
+                .await
+                .map_err(|error| error.to_string()),
+        },
+        Command::DeleteSchedule {
+            request_id,
+            namespace,
+            schedule_id,
+        } => Message::OperationFinished {
+            request_id,
+            operation: OperationKind::DeleteSchedule,
+            result: service
+                .delete_schedule(&namespace, &schedule_id)
                 .await
                 .map_err(|error| error.to_string()),
         },

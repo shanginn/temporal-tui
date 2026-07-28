@@ -20,6 +20,16 @@ required at runtime.
   utilization, task outcomes, sticky-cache health, SDK version, and plugins.
 - Inspect GA Worker Deployments, traffic ramping, routing propagation, and
   per-version drainage state without using the removed legacy Versioning APIs.
+- Invoke Workflow Query and Update handlers with zero or more JSON arguments,
+  decode their results, and display complete Update failures.
+- Pause or unpause a running Workflow and reset it at an explicit history-event
+  boundary. Pause availability follows the server-side
+  `frontend.WorkflowPauseEnabled` capability.
+- Browse and filter Schedules with cursor pagination; inspect their action,
+  policies, recent/future runs, memo, Search Attributes, and decoded inputs.
+- Create, update, pause, unpause, trigger, backfill, and delete Schedules.
+  Schedule updates use the current conflict token and preserve fields the form
+  does not change.
 - Refresh manually or automatically.
 - Use named connection profiles and saved visibility queries.
 - Store API keys in macOS Keychain, Windows Credential Manager, Linux Secret
@@ -32,16 +42,21 @@ required at runtime.
 - Request graceful cancellation or terminate an exact workflow run.
 - Connect to a local cluster, self-hosted Temporal, or Temporal Cloud with API
   key, TLS, mTLS, custom CA, server-name override, and repeated gRPC headers.
-- Decode displayed payloads and encode outgoing signal payloads through a
-  standard Temporal Codec Server. Namespace routing, secret auth headers,
-  response-size limits, timeouts, and redirect blocking are enforced.
+- Decode displayed payloads and encode outgoing signal, Query, Update, and
+  Schedule payloads through a standard Temporal Codec Server. Namespace
+  routing, secret auth headers, response-size limits, timeouts, redirect
+  blocking, and one bounded transient-transport retry are enforced.
 - Restore raw mode, the cursor, and the alternate screen on normal and error
   exits.
 
 Cancellation and termination require typing the exact Workflow ID and are
 unavailable in read-only mode.
+Reset, Schedule trigger, backfill, and deletion also require typing the exact
+target ID. All mutations are unavailable in read-only mode.
 Mutation commands retain both the workflow ID and run ID selected when the
 confirmation opened, so a refresh cannot redirect an action to a different run.
+
+The staged development and release plan is tracked in [ROADMAP.md](ROADMAP.md).
 
 ## Build
 
@@ -152,7 +167,7 @@ profile or diagnostic exports.
 
 | Key | Action |
 | --- | --- |
-| `1` / `2` / `3` / `4` | Workflows / Task Queues / Workers / Deployments |
+| `1` / `2` / `3` / `4` / `5` | Workflows / Task Queues / Workers / Deployments / Schedules |
 | `j` / `k`, arrows | Move through the active list or Workflow history |
 | `g` / `G`, home / end | Jump to first or last item |
 | `tab` / `enter` | Switch between Workflow and history panes |
@@ -169,8 +184,13 @@ profile or diagnostic exports.
 | `y` | Copy Workflow ID and Run ID |
 | `e` / `o` | Export redacted JSON / open Temporal Web UI |
 | `s` | Send a signal with JSON input |
+| `Q` / `U` | Invoke a Query / Update with a JSON argument array |
+| `p` | Pause or unpause the selected Workflow or Schedule |
+| `R` | Reset a Workflow at a history event (exact-ID confirmation) |
 | `c` | Request workflow cancellation |
 | `x` | Terminate a workflow |
+| `N` / `E` | Create / edit a Schedule |
+| `t` / `b` / `d` | Trigger / backfill / delete a Schedule |
 | `?` | Open keyboard help |
 | `q` / `ctrl-c` | Quit |
 
@@ -186,7 +206,8 @@ The live contract test starts an ephemeral Temporal dev server and verifies
 cluster discovery, namespaces, visibility cursors and counts, complete history
 pagination, Task Queue backlog, Worker and Worker Deployment endpoints, payload
 redaction, an encode/decode Codec Server round trip, Workflow chains, signal,
-cancel, and terminate through the real gRPC adapter:
+cancel, terminate, Query, Update, Workflow pause/reset, and the complete
+Schedule lifecycle through the real gRPC adapter and a real Rust SDK Worker:
 
 ```sh
 scripts/install-temporal-cli.sh
