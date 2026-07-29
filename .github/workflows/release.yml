@@ -18,7 +18,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-24.04
+          - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             format: tgz
           - os: macos-26
@@ -48,10 +48,27 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: scripts/install-protoc.ps1
+      - name: Install checksum-verified Temporal CLI on Unix
+        if: runner.os != 'Windows'
+        run: scripts/install-temporal-cli.sh
+      - name: Install checksum-verified Temporal CLI on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: scripts/install-temporal-cli.ps1
       - name: Cache Rust build
         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
       - name: Build optimized binary
         run: cargo build --locked --release
+      - name: Verify Linux binary baseline
+        if: runner.os == 'Linux'
+        shell: bash
+        run: scripts/verify-linux-binary.sh target/release/temporal-tui
+      - name: Verify Windows binary has a static CRT
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          scripts/verify-windows-binary.ps1 `
+            -Binary target/release/temporal-tui.exe
       - name: Package Unix artifact
         if: matrix.format == 'tgz'
         run: scripts/package.sh "${{ matrix.target }}" dist
@@ -62,7 +79,10 @@ jobs:
       - name: Verify Unix clean install, upgrade, and uninstall
         if: matrix.format == 'tgz'
         shell: bash
-        run: scripts/package-smoke.sh "dist/temporal-tui-${GITHUB_REF_NAME}-${{ matrix.target }}.tgz"
+        run: |
+          TEMPORAL_CLI="${GITHUB_WORKSPACE}/.tools/bin/temporal" \
+            scripts/package-smoke.sh \
+            "dist/temporal-tui-${GITHUB_REF_NAME}-${{ matrix.target }}.tgz"
       - name: Verify standalone binary installer
         if: matrix.format == 'tgz'
         shell: bash
@@ -73,7 +93,10 @@ jobs:
       - name: Verify Windows clean install, upgrade, and uninstall
         if: matrix.format == 'zip'
         shell: pwsh
-        run: scripts/package-smoke.ps1 -Archive "dist/temporal-tui-$env:GITHUB_REF_NAME-${{ matrix.target }}.zip"
+        run: |
+          scripts/package-smoke.ps1 `
+            -Archive "dist/temporal-tui-$env:GITHUB_REF_NAME-${{ matrix.target }}.zip" `
+            -TemporalCli .tools/bin/temporal.exe
       - name: Upload release artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -126,3 +149,98 @@ jobs:
         with:
           generate_release_notes: true
           files: dist/*
+
+  scoop:
+    name: Public Scoop install and Temporal CLI extension
+    needs: publish
+    runs-on: windows-2025
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install checksum-verified Temporal CLI
+        shell: pwsh
+        run: scripts/install-temporal-cli.ps1
+      - name: Install pinned Scoop
+        shell: pwsh
+        run: |
+          $Commit = "b0ee913725139b816f9178163af0aecdba07a7ed"
+          $ExpectedSha = "48f6ea398b3a3fa26fae0093d37bd85b13e7eaa5d1d4a3e208408768408e35ae"
+          $Installer = Join-Path $env:RUNNER_TEMP "install-scoop.ps1"
+          Invoke-WebRequest `
+            -Uri "https://raw.githubusercontent.com/ScoopInstaller/Install/$Commit/install.ps1" `
+            -OutFile $Installer
+          $ActualSha = (
+            Get-FileHash $Installer -Algorithm SHA256
+          ).Hash.ToLowerInvariant()
+          if ($ActualSha -ne $ExpectedSha) {
+            throw "Scoop installer checksum mismatch"
+          }
+          $ScoopDir = Join-Path $env:RUNNER_TEMP "scoop"
+          $ScoopGlobalDir = Join-Path $env:RUNNER_TEMP "scoop-global"
+          $ScoopCacheDir = Join-Path $env:RUNNER_TEMP "scoop-cache"
+          Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope Process -Force
+          & $Installer `
+            -RunAsAdmin `
+            -ScoopDir $ScoopDir `
+            -ScoopGlobalDir $ScoopGlobalDir `
+            -ScoopCacheDir $ScoopCacheDir
+          if ($LASTEXITCODE -ne 0) {
+            throw "Scoop installation failed"
+          }
+          "SCOOP=$ScoopDir" | Out-File $env:GITHUB_ENV -Append
+      - name: Verify exact public manifest, shim, and extension
+        shell: pwsh
+        run: |
+          $env:PATH = "$env:SCOOP\shims;$env:PATH"
+          $Scoop = Join-Path $env:SCOOP "shims/scoop.ps1"
+          $Manifest = "https://github.com/$env:GITHUB_REPOSITORY/releases/download/$env:GITHUB_REF_NAME/temporal-tui.json"
+          & $Scoop install $Manifest
+          if ($LASTEXITCODE -ne 0) {
+            throw "Scoop could not install the public release manifest"
+          }
+
+          $ExpectedVersion = ($env:GITHUB_REF_NAME).TrimStart("v")
+          $TuiVersion = (& temporal-tui.exe --version | Out-String).Trim()
+          if ($TuiVersion -ne "temporal-tui $ExpectedVersion") {
+            throw "unexpected Scoop-installed version: $TuiVersion"
+          }
+          $AllHelp = (
+            & .tools/bin/temporal.exe help --all |
+              Out-String
+          )
+          if (
+            $LASTEXITCODE -ne 0 -or
+            $AllHelp -notmatch "(?m)^\s{2}tui\s"
+          ) {
+            throw "Temporal CLI did not discover the Scoop shim"
+          }
+          $PluginVersion = (
+            & .tools/bin/temporal.exe tui --version |
+              Out-String
+          ).Trim()
+          if ($PluginVersion -ne "temporal-tui $ExpectedVersion") {
+            throw "unexpected Temporal CLI extension version: $PluginVersion"
+          }
+
+          $InstalledBinary = Join-Path $env:SCOOP (
+            "apps/temporal-tui/current/temporal-tui.exe"
+          )
+          scripts/temporal-cli-extension-smoke.ps1 `
+            -TemporalCli .tools/bin/temporal.exe `
+            -TuiBinary $InstalledBinary `
+            -ExpectedVersion $ExpectedVersion
+
+          & $Scoop uninstall temporal-tui
+          if ($LASTEXITCODE -ne 0) {
+            throw "Scoop uninstall failed"
+          }
+          if (
+            Test-Path (
+              Join-Path $env:SCOOP "apps/temporal-tui/current"
+            )
+          ) {
+            throw "Scoop left the application installed"
+          }
+          if (Get-Command temporal-tui.exe -ErrorAction SilentlyContinue) {
+            throw "Scoop left the temporal-tui shim on PATH"
+          }

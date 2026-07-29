@@ -46,7 +46,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-24.04
+          - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             binary: ./target/release/temporal-tui
           - os: macos-26
@@ -71,6 +71,13 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: scripts/install-protoc.ps1
+      - name: Install checksum-verified Temporal CLI on Unix
+        if: runner.os != 'Windows'
+        run: scripts/install-temporal-cli.sh
+      - name: Install checksum-verified Temporal CLI on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: scripts/install-temporal-cli.ps1
       - name: Cache Rust build
         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
       - name: Run tests
@@ -79,16 +86,55 @@ jobs:
         run: cargo build --locked --release
       - name: Smoke-test binary
         run: ${{ matrix.binary }} --version
-      - name: Verify standalone binary installer
+      - name: Verify Linux binary baseline
+        if: runner.os == 'Linux'
+        shell: bash
+        run: scripts/verify-linux-binary.sh "${{ matrix.binary }}"
+      - name: Verify Windows binary has a static CRT
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: scripts/verify-windows-binary.ps1 -Binary "${{ matrix.binary }}"
+      - name: Verify Temporal CLI extension on Unix
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          version="$("${{ matrix.binary }}" --version | awk '{ print $2 }')"
+          scripts/temporal-cli-extension-smoke.sh \
+            .tools/bin/temporal \
+            "${{ matrix.binary }}" \
+            "${version}"
+      - name: Verify Temporal CLI extension on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $Version = (
+            (& "${{ matrix.binary }}" --version | Out-String).Trim() -split '\s+'
+          )[-1]
+          scripts/temporal-cli-extension-smoke.ps1 `
+            -TemporalCli .tools/bin/temporal.exe `
+            -TuiBinary "${{ matrix.binary }}" `
+            -ExpectedVersion $Version
+      - name: Verify Unix package and standalone binary installer
         if: runner.os != 'Windows'
         shell: bash
         run: |
           version="$("${{ matrix.binary }}" --version | awk '{print $2}')"
           archive="$(scripts/package.sh \
             "${{ matrix.target }}" dist "${{ matrix.binary }}")"
-          scripts/installer-smoke.sh \
-            "${archive}" \
-            "${version}"
+          TEMPORAL_CLI="${GITHUB_WORKSPACE}/.tools/bin/temporal" \
+            scripts/package-smoke.sh "${archive}"
+          scripts/installer-smoke.sh "${archive}" "${version}"
+      - name: Verify Windows package
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $Archive = scripts/package.ps1 `
+            -Target "${{ matrix.target }}" `
+            -OutputDirectory dist `
+            -BinaryPath "${{ matrix.binary }}"
+          scripts/package-smoke.ps1 `
+            -Archive $Archive `
+            -TemporalCli .tools/bin/temporal.exe
 
   live:
     name: Disposable Temporal live contract

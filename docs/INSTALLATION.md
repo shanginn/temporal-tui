@@ -21,25 +21,64 @@ shell startup files.
 Install a specific version or a different prefix:
 
 ```sh
-sh temporal-tui-installer.sh --version 1.1.0
+sh temporal-tui-installer.sh --version 1.2.0
 sh temporal-tui-installer.sh --prefix /opt/temporal-tui
 ```
 
 The default binary path is `~/.local/bin/temporal-tui`. Add
 `~/.local/bin` to `PATH` if it is not already present.
 
+## Temporal CLI extension
+
+With Temporal CLI 1.8.1 or newer, the preferred command is `temporal tui`.
+Temporal CLI's executable-extension convention maps `temporal-NAME` on `PATH`
+to `temporal NAME`, so the installed `temporal-tui` binary is discovered
+without a plugin registration step:
+
+```sh
+temporal help --all
+temporal tui --help
+temporal tui --profile production
+```
+
+`temporal help --all` should list `tui`. Put TUI flags and subcommands after
+`tui`; `temporal tui --profile production` is correct. The installer does not
+bundle Temporal CLI, and the standalone `temporal-tui --profile production`
+command remains supported when Temporal CLI is absent or older.
+
+Temporal CLI acts only as the extension dispatcher. Its config and env-file
+profiles are not imported into `temporal-tui`. Ordinary process environment
+variables are inherited, so `TEMPORAL_PROFILE` selects a TUI connection
+profile, not a Temporal CLI config profile. Prefer explicit flags after `tui`
+when the same shell environment is used for both tools. The host CLI's
+`--command-timeout` is accepted only for the read-only local `config-path`
+command. It is rejected for the dashboard, authentication, credential storage,
+config loading/migration, and config mutations because a forced kill could
+interrupt those operations unsafely. Use TUI-native flags such as `--no-color`
+instead of Temporal CLI global output/config flags.
+
+On Windows the executable is `temporal-tui.exe`. When it is on `PATH`,
+Temporal CLI discovers it as `temporal.exe tui`; no renamed copy or additional
+shim is required.
+
+The Linux x86_64 archive targets glibc 2.35 or newer. The Windows executable
+statically links the MSVC C runtime and does not require a separate Visual C++
+Redistributable install.
+
 ## Verify a release
 
 Download the target archive and `SHA256SUMS` from the matching GitHub Release:
 
 ```sh
-shasum -a 256 -c SHA256SUMS
-gh attestation verify temporal-tui-v1.1.0-aarch64-apple-darwin.tgz \
+grep '  temporal-tui-v1.2.0-aarch64-apple-darwin.tgz$' SHA256SUMS |
+  shasum -a 256 -c -
+gh attestation verify temporal-tui-v1.2.0-aarch64-apple-darwin.tgz \
   --repo shanginn/temporal-tui
 ```
 
-Linux can use `sha256sum -c`. Archives contain the binary, license, README,
-manpages, and Bash, Zsh, Fish, PowerShell, and Elvish completions.
+Linux can pipe the same filtered checksum line to `sha256sum -c -`. Archives
+contain the binary, license, README, manpages, and Bash, Zsh, Fish, PowerShell,
+and Elvish completions.
 
 ## Package managers
 
@@ -68,26 +107,29 @@ Cargo from source:
 
 ```sh
 cargo install --locked --git https://github.com/shanginn/temporal-tui \
-  --tag v1.1.0
+  --tag v1.2.0
 ```
 
 The manifest includes `cargo-binstall` metadata for release archives.
 
 ## Protected self-hosted login
 
-The prebuilt binary contains the complete login client. It does not need a
-`temporal-auth` wrapper/plugin or a Temporal CLI installation:
+The prebuilt binary contains the complete login client. With Temporal CLI
+1.8.1+, use the preferred extension syntax:
 
 ```sh
-temporal-tui --profile rubase auth login \
+temporal tui --profile rubase auth login \
   --url https://temporal.example.com \
   --username admin
-temporal-tui --profile rubase
+temporal tui --profile rubase
+temporal tui --profile rubase auth whoami
+temporal tui --profile rubase auth logout
 ```
 
 The interactive password prompt is masked. Non-interactive installations can
 pipe a password to `auth login --password-stdin`; there is no password flag.
-Use `auth whoami` to inspect the local session and `auth logout` to revoke it.
+Use the same commands through standalone `temporal-tui` when Temporal CLI is
+not installed. Neither form needs a separate `temporal-auth` wrapper/plugin.
 
 ## Manual Unix install
 
@@ -104,11 +146,12 @@ install -m 0644 completions/temporal-tui.fish \
   ~/.config/fish/completions/temporal-tui.fish
 ```
 
-Ensure `~/.local/bin` is in `PATH`, then run `temporal-tui --version`.
+Ensure `~/.local/bin` is in `PATH`, then run `temporal tui --version` with
+Temporal CLI 1.8.1+, or `temporal-tui --version` standalone.
 
 ## Upgrade and rollback
 
-Replace the binary through the same method. On first config read, v1.1 migrates
+Replace the binary through the same method. On first config read, v1.2 migrates
 schema 1 or schema 2 to schema 3. It first writes a byte-identical
 `config.toml.v1.bak` or `config.toml.v2.bak`, then atomically replaces the
 config; both files are `0600` on Unix.
@@ -132,9 +175,11 @@ scoop uninstall temporal-tui
 
 Manual installs remove the binary, manpages, and completion files. Uninstall
 intentionally preserves config, migration backups, exports, and saved
-credentials. Run `temporal-tui --profile NAME auth logout` before uninstalling
-if a protected self-hosted session should be revoked and removed. Use
-`temporal-tui config-path` before removing remaining files manually.
+credentials. Run `temporal tui --profile NAME auth logout` before uninstalling
+if a protected self-hosted session should be revoked and removed; standalone
+`temporal-tui --profile NAME auth logout` is equivalent. Use
+`temporal tui config-path` (or standalone `temporal-tui config-path`) before
+removing remaining files manually.
 
 Release CI smoke-tests clean install, schema upgrade, binary removal, and
 configuration preservation on every packaged OS.

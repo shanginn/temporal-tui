@@ -1,6 +1,8 @@
 param(
     [Parameter(Mandatory = $true)]
-    [string]$Archive
+    [string]$Archive,
+
+    [string]$TemporalCli = $env:TEMPORAL_CLI
 )
 
 $ErrorActionPreference = "Stop"
@@ -40,6 +42,16 @@ try {
     Copy-Item $PackagedBinary $InstalledBinary
     & $InstalledBinary --version
     & $InstalledBinary --help | Out-Null
+    if (-not [string]::IsNullOrWhiteSpace($TemporalCli)) {
+        $ProjectRoot = Split-Path -Parent (
+            Split-Path -Parent $MyInvocation.MyCommand.Path
+        )
+        $Version = ((& $InstalledBinary --version | Out-String).Trim() -split '\s+')[-1]
+        & (Join-Path $ProjectRoot "scripts/temporal-cli-extension-smoke.ps1") `
+            -TemporalCli $TemporalCli `
+            -TuiBinary $InstalledBinary `
+            -ExpectedVersion $Version
+    }
 
     [System.IO.File]::WriteAllText($Config, "schema_version = 1`n")
     $env:TEMPORAL_TUI_CONFIG = $Config

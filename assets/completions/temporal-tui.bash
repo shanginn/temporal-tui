@@ -188,7 +188,7 @@ _temporal-tui() {
 
     case "${cmd}" in
         temporal__tui)
-            opts="-n -q -h -V --config --profile --address --namespace --api-key --tls --tls-ca --tls-cert --tls-key --tls-server-name --header --codec-endpoint --codec-header --codec-auth --query --page-size --refresh-seconds --no-auto-refresh --no-color --read-only --web-ui-url --help --version profile filter auth config-path help"
+            opts="-n -q -h -V --config --profile --command-timeout --address --namespace --api-key --tls --tls-ca --tls-cert --tls-key --tls-server-name --header --codec-endpoint --codec-header --codec-auth --query --page-size --refresh-seconds --no-auto-refresh --no-color --read-only --web-ui-url --help --version profile filter auth config-path help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 1 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -199,6 +199,10 @@ _temporal-tui() {
                     return 0
                     ;;
                 --profile)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --command-timeout)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -278,7 +282,7 @@ _temporal-tui() {
             return 0
             ;;
         temporal__subcmd__tui__subcmd__auth)
-            opts="-h --config --profile --help login whoami logout help"
+            opts="-h --config --profile --command-timeout --help login whoami logout help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -289,6 +293,10 @@ _temporal-tui() {
                     return 0
                     ;;
                 --profile)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --command-timeout)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -370,7 +378,7 @@ _temporal-tui() {
             return 0
             ;;
         temporal__subcmd__tui__subcmd__auth__subcmd__login)
-            opts="-n -h --url --username --address --namespace --password-stdin --allow-http --set-default --config --profile --help"
+            opts="-n -h --url --username --address --namespace --password-stdin --allow-http --set-default --config --profile --command-timeout --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -404,6 +412,10 @@ _temporal-tui() {
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
+                --command-timeout)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
                 *)
                     COMPREPLY=()
                     ;;
@@ -412,7 +424,7 @@ _temporal-tui() {
             return 0
             ;;
         temporal__subcmd__tui__subcmd__auth__subcmd__logout)
-            opts="-h --config --profile --help"
+            opts="-h --config --profile --command-timeout --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -423,6 +435,10 @@ _temporal-tui() {
                     return 0
                     ;;
                 --profile)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --command-timeout)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -434,7 +450,7 @@ _temporal-tui() {
             return 0
             ;;
         temporal__subcmd__tui__subcmd__auth__subcmd__whoami)
-            opts="-h --config --profile --help"
+            opts="-h --config --profile --command-timeout --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -448,6 +464,10 @@ _temporal-tui() {
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
+                --command-timeout)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
                 *)
                     COMPREPLY=()
                     ;;
@@ -456,7 +476,7 @@ _temporal-tui() {
             return 0
             ;;
         temporal__subcmd__tui__subcmd__config__subcmd__path)
-            opts="-h --config --profile --help"
+            opts="-h --config --profile --command-timeout --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -467,6 +487,10 @@ _temporal-tui() {
                     return 0
                     ;;
                 --profile)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --command-timeout)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -478,7 +502,7 @@ _temporal-tui() {
             return 0
             ;;
         temporal__subcmd__tui__subcmd__filter)
-            opts="-h --config --profile --help list save remove help"
+            opts="-h --config --profile --command-timeout --help list save remove help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -489,6 +513,10 @@ _temporal-tui() {
                     return 0
                     ;;
                 --profile)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --command-timeout)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -570,7 +598,7 @@ _temporal-tui() {
             return 0
             ;;
         temporal__subcmd__tui__subcmd__filter__subcmd__list)
-            opts="-h --config --profile --help"
+            opts="-h --config --profile --command-timeout --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -581,6 +609,10 @@ _temporal-tui() {
                     return 0
                     ;;
                 --profile)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --command-timeout)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -592,7 +624,7 @@ _temporal-tui() {
             return 0
             ;;
         temporal__subcmd__tui__subcmd__filter__subcmd__remove)
-            opts="-h --yes --config --profile --help"
+            opts="-h --yes --config --profile --command-timeout --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -603,6 +635,10 @@ _temporal-tui() {
                     return 0
                     ;;
                 --profile)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --command-timeout)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -614,7 +650,7 @@ _temporal-tui() {
             return 0
             ;;
         temporal__subcmd__tui__subcmd__filter__subcmd__save)
-            opts="-h --replace --config --profile --help"
+            opts="-h --replace --config --profile --command-timeout --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -625,6 +661,10 @@ _temporal-tui() {
                     return 0
                     ;;
                 --profile)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --command-timeout)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -902,7 +942,7 @@ _temporal-tui() {
             return 0
             ;;
         temporal__subcmd__tui__subcmd__profile)
-            opts="-h --config --profile --help list show create set-default set-api-key clear-api-key remove help"
+            opts="-h --config --profile --command-timeout --help list show create set-default set-api-key clear-api-key remove help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -916,6 +956,10 @@ _temporal-tui() {
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
+                --command-timeout)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
                 *)
                     COMPREPLY=()
                     ;;
@@ -924,7 +968,7 @@ _temporal-tui() {
             return 0
             ;;
         temporal__subcmd__tui__subcmd__profile__subcmd__clear__subcmd__api__subcmd__key)
-            opts="-h --yes --config --profile --help"
+            opts="-h --yes --config --profile --command-timeout --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -938,6 +982,10 @@ _temporal-tui() {
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
+                --command-timeout)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
                 *)
                     COMPREPLY=()
                     ;;
@@ -946,7 +994,7 @@ _temporal-tui() {
             return 0
             ;;
         temporal__subcmd__tui__subcmd__profile__subcmd__create)
-            opts="-n -h --address --namespace --tls --tls-ca --tls-cert --tls-key --tls-server-name --header --codec-endpoint --codec-header --codec-auth-env --api-key-env --web-ui-url --read-only --set-default --replace --config --profile --help"
+            opts="-n -h --address --namespace --tls --tls-ca --tls-cert --tls-key --tls-server-name --header --codec-endpoint --codec-header --codec-auth-env --api-key-env --web-ui-url --read-only --set-default --replace --config --profile --command-timeout --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -1009,6 +1057,10 @@ _temporal-tui() {
                     return 0
                     ;;
                 --profile)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --command-timeout)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -1146,7 +1198,7 @@ _temporal-tui() {
             return 0
             ;;
         temporal__subcmd__tui__subcmd__profile__subcmd__list)
-            opts="-h --config --profile --help"
+            opts="-h --config --profile --command-timeout --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -1157,6 +1209,10 @@ _temporal-tui() {
                     return 0
                     ;;
                 --profile)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --command-timeout)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -1168,7 +1224,7 @@ _temporal-tui() {
             return 0
             ;;
         temporal__subcmd__tui__subcmd__profile__subcmd__remove)
-            opts="-h --yes --config --profile --help"
+            opts="-h --yes --config --profile --command-timeout --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -1182,6 +1238,10 @@ _temporal-tui() {
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
+                --command-timeout)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
                 *)
                     COMPREPLY=()
                     ;;
@@ -1190,7 +1250,7 @@ _temporal-tui() {
             return 0
             ;;
         temporal__subcmd__tui__subcmd__profile__subcmd__set__subcmd__api__subcmd__key)
-            opts="-h --from-env --config --profile --help"
+            opts="-h --from-env --config --profile --command-timeout --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -1208,6 +1268,10 @@ _temporal-tui() {
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
+                --command-timeout)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
                 *)
                     COMPREPLY=()
                     ;;
@@ -1216,7 +1280,7 @@ _temporal-tui() {
             return 0
             ;;
         temporal__subcmd__tui__subcmd__profile__subcmd__set__subcmd__default)
-            opts="-h --config --profile --help"
+            opts="-h --config --profile --command-timeout --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -1227,6 +1291,10 @@ _temporal-tui() {
                     return 0
                     ;;
                 --profile)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --command-timeout)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -1238,7 +1306,7 @@ _temporal-tui() {
             return 0
             ;;
         temporal__subcmd__tui__subcmd__profile__subcmd__show)
-            opts="-h --config --profile --help"
+            opts="-h --config --profile --command-timeout --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -1249,6 +1317,10 @@ _temporal-tui() {
                     return 0
                     ;;
                 --profile)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --command-timeout)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;

@@ -5,6 +5,11 @@ with Rust and [Ratatui](https://ratatui.rs/). It connects directly to a Temporal
 frontend through the official Rust client; the web UI and Temporal CLI are not
 required at runtime.
 
+With Temporal CLI 1.8.1 or newer installed, the preferred launch is
+`temporal tui`. Temporal discovers the `temporal-tui` executable on `PATH` as
+an official executable extension. The standalone `temporal-tui` command
+remains fully supported and does not require Temporal CLI.
+
 ## Install
 
 Install the latest prebuilt binary on macOS ARM64/Intel or Linux x86_64:
@@ -21,6 +26,17 @@ The installer verifies the release archive against `SHA256SUMS` and installs
 the binary, manpage, and completions below `~/.local`. It needs only standard
 operating-system tools: no Homebrew, Rust, Xcode, compiler, or `sudo`. It does
 not edit shell profiles; add `~/.local/bin` to `PATH` if necessary.
+
+Linux x86_64 releases target glibc 2.35 or newer (Ubuntu 22.04 and later).
+Windows releases statically link the MSVC C runtime, so the executable does not
+require a separate Visual C++ Redistributable installation.
+
+If Temporal CLI 1.8.1 or newer is available, confirm discovery and launch:
+
+```sh
+temporal help --all
+temporal tui
+```
 
 Homebrew remains available as an optional package-manager route:
 
@@ -74,9 +90,9 @@ installer above; `temporal-tui` itself has no Xcode runtime dependency.
   service is replaced, and stale responses from the previous cluster are
   discarded.
 - Sign in to protected self-hosted deployments with a masked local password and
-  keep the resulting session refreshed while the TUI is running. The TUI talks
-  directly to Temporal gRPC; no wrapper, plugin, or Temporal CLI process is
-  required.
+  keep the resulting session refreshed while the TUI is running. Whether
+  launched as `temporal tui` or `temporal-tui`, the TUI talks directly to
+  Temporal gRPC instead of proxying requests through Temporal CLI.
 - Store API keys in macOS Keychain, Windows Credential Manager, Linux Secret
   Service, or resolve them from an environment variable. Secret material is
   never written to the profile file.
@@ -136,17 +152,49 @@ cargo install --locked --git https://github.com/shanginn/temporal-tui
 ```
 
 This version pins Ratatui 0.30.2, Crossterm 0.29.0,
-`temporalio-client` 0.5.0, Tokio 1.53.1, and Temporal CLI 1.8.1. The official
-Temporal Rust client is currently marked **Public Preview**, so review its
+`temporalio-client` 0.5.0, and Tokio 1.53.1. Release tests pin Temporal CLI
+1.8.1 as the supported/tested baseline for the preferred `temporal tui`
+extension UX; Temporal CLI is not bundled or linked. The official Temporal
+Rust client is currently marked **Public Preview**, so review its
 [support status](https://github.com/temporalio/sdk-rust) before adopting this
 tool for critical production operations.
 
 ## Run
 
+### Preferred: Temporal CLI extension
+
+Temporal CLI 1.8.1+ maps an executable named `temporal-NAME` on `PATH` to
+`temporal NAME`. Installing `temporal-tui` therefore adds `temporal tui`
+without modifying Temporal CLI. On Windows the discovered executable is
+`temporal-tui.exe`.
+
+```sh
+temporal help --all
+temporal tui --help
+```
+
+`temporal help --all` lists discovered extensions. Put all TUI flags and
+subcommands after `tui`, for example:
+`temporal tui --profile production --read-only`. Every example below can
+instead use the standalone `temporal-tui` command; Temporal CLI is optional.
+
+Temporal CLI is only the process dispatcher here; its config and env-file
+profiles are not loaded or merged into the TUI. Ordinary process environment
+variables are inherited, so the documented TUI variables still apply:
+`TEMPORAL_PROFILE` selects a `temporal-tui` profile, not a Temporal CLI config
+profile. Prefer explicit flags after `tui` when the same shell environment is
+used for both tools. The host `--command-timeout` is accepted only for the
+read-only local `config-path` command. It is rejected for the dashboard,
+authentication, credential storage, config loading/migration, and config
+mutations because a forced kill could interrupt those operations unsafely.
+Use `--no-color` for TUI color control, and avoid other Temporal CLI global
+output/config flags because the interactive dashboard does not silently
+reinterpret them.
+
 Against a local Temporal frontend:
 
 ```sh
-./target/release/temporal-tui \
+temporal tui \
   --address 127.0.0.1:7233 \
   --namespace default
 ```
@@ -154,12 +202,12 @@ Against a local Temporal frontend:
 Against a protected self-hosted deployment:
 
 ```sh
-temporal-tui --profile rubase auth login \
+temporal tui --profile rubase auth login \
   --url https://temporal.example.com \
   --username admin
-temporal-tui --profile rubase
-temporal-tui --profile rubase auth whoami
-temporal-tui --profile rubase auth logout
+temporal tui --profile rubase
+temporal tui --profile rubase auth whoami
+temporal tui --profile rubase auth logout
 ```
 
 The password prompt is masked. Automation can pipe the password to
@@ -173,13 +221,13 @@ Against Temporal Cloud with an API key:
 TEMPORAL_ADDRESS='your-namespace.account.tmprl.cloud:7233' \
 TEMPORAL_NAMESPACE='your-namespace' \
 TEMPORAL_API_KEY='your-api-key' \
-./target/release/temporal-tui
+temporal tui
 ```
 
 With mTLS:
 
 ```sh
-./target/release/temporal-tui \
+temporal tui \
   --address temporal.example.com:7233 \
   --namespace production \
   --tls \
@@ -188,24 +236,24 @@ With mTLS:
   --tls-key ./client.key
 ```
 
-Run `temporal-tui --help` for visibility-query, refresh, page-size, TLS, and
-custom-header options. Values read from API-key and private-key environment
-variables are not echoed in the generated help.
+Run `temporal tui --help` (or `temporal-tui --help`) for visibility-query,
+refresh, page-size, TLS, and custom-header options. Values read from API-key
+and private-key environment variables are not echoed in the generated help.
 
 ### Connection profiles
 
-Profiles live in the platform config directory (`temporal-tui config-path`
+Profiles live in the platform config directory (`temporal tui config-path`
 prints the exact file). Create and select one:
 
 ```sh
-temporal-tui profile create cloud \
+temporal tui profile create cloud \
   --address your-namespace.account.tmprl.cloud:7233 \
   --namespace your-namespace \
   --tls \
   --web-ui-url https://cloud.temporal.io \
   --set-default
-temporal-tui profile set-api-key cloud
-temporal-tui --profile cloud
+temporal tui profile set-api-key cloud
+temporal tui --profile cloud
 ```
 
 `profile set-api-key` reads without terminal echo and stores the value in the
@@ -241,7 +289,7 @@ fresh login.
 Save reusable Visibility queries without hand-editing TOML:
 
 ```sh
-temporal-tui filter save failures \
+temporal tui filter save failures \
   "ExecutionStatus = 'Failed' AND StartTime > '2026-07-27T00:00:00Z'"
 ```
 
@@ -250,7 +298,7 @@ Configure a Codec Server per profile. The endpoint can include
 `X-Namespace`:
 
 ```sh
-temporal-tui profile create encrypted-cloud \
+temporal tui profile create encrypted-cloud \
   --address your-namespace.account.tmprl.cloud:7233 \
   --namespace your-namespace \
   --tls \

@@ -17,6 +17,7 @@ _temporal-tui() {
     _arguments "${_arguments_options[@]}" : \
 '--config=[Alternate config file. Defaults to the platform user config directory]:CONFIG:_files' \
 '--profile=[Named connection profile]:PROFILE:_default' \
+'--command-timeout=[Temporal CLI forwards this host-enforced timeout to extensions]:COMMAND_TIMEOUT:_default' \
 '--address=[Temporal frontend address. A scheme is optional]:ADDRESS:_default' \
 '-n+[Namespace selected at startup]:NAMESPACE:_default' \
 '--namespace=[Namespace selected at startup]:NAMESPACE:_default' \
@@ -55,6 +56,7 @@ _temporal-tui() {
 _arguments "${_arguments_options[@]}" : \
 '--config=[Alternate config file. Defaults to the platform user config directory]:CONFIG:_files' \
 '--profile=[Named connection profile]:PROFILE:_default' \
+'--command-timeout=[Temporal CLI forwards this host-enforced timeout to extensions]:COMMAND_TIMEOUT:_default' \
 '-h[Print help]' \
 '--help[Print help]' \
 ":: :_temporal-tui__subcmd__profile_commands" \
@@ -71,6 +73,7 @@ _arguments "${_arguments_options[@]}" : \
 _arguments "${_arguments_options[@]}" : \
 '--config=[Alternate config file. Defaults to the platform user config directory]:CONFIG:_files' \
 '--profile=[Named connection profile]:PROFILE:_default' \
+'--command-timeout=[Temporal CLI forwards this host-enforced timeout to extensions]:COMMAND_TIMEOUT:_default' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0
@@ -79,6 +82,7 @@ _arguments "${_arguments_options[@]}" : \
 _arguments "${_arguments_options[@]}" : \
 '--config=[Alternate config file. Defaults to the platform user config directory]:CONFIG:_files' \
 '--profile=[Named connection profile]:PROFILE:_default' \
+'--command-timeout=[Temporal CLI forwards this host-enforced timeout to extensions]:COMMAND_TIMEOUT:_default' \
 '-h[Print help]' \
 '--help[Print help]' \
 ':name:_default' \
@@ -101,6 +105,7 @@ _arguments "${_arguments_options[@]}" : \
 '--web-ui-url=[]:WEB_UI_URL:_default' \
 '--config=[Alternate config file. Defaults to the platform user config directory]:CONFIG:_files' \
 '--profile=[Named connection profile]:PROFILE:_default' \
+'--command-timeout=[Temporal CLI forwards this host-enforced timeout to extensions]:COMMAND_TIMEOUT:_default' \
 '--tls[]' \
 '--read-only[]' \
 '--set-default[]' \
@@ -114,6 +119,7 @@ _arguments "${_arguments_options[@]}" : \
 _arguments "${_arguments_options[@]}" : \
 '--config=[Alternate config file. Defaults to the platform user config directory]:CONFIG:_files' \
 '--profile=[Named connection profile]:PROFILE:_default' \
+'--command-timeout=[Temporal CLI forwards this host-enforced timeout to extensions]:COMMAND_TIMEOUT:_default' \
 '-h[Print help]' \
 '--help[Print help]' \
 ':name:_default' \
@@ -124,6 +130,7 @@ _arguments "${_arguments_options[@]}" : \
 '--from-env=[Read the API key from this environment variable instead of prompting]:FROM_ENV:_default' \
 '--config=[Alternate config file. Defaults to the platform user config directory]:CONFIG:_files' \
 '--profile=[Named connection profile]:PROFILE:_default' \
+'--command-timeout=[Temporal CLI forwards this host-enforced timeout to extensions]:COMMAND_TIMEOUT:_default' \
 '-h[Print help]' \
 '--help[Print help]' \
 ':name:_default' \
@@ -133,6 +140,7 @@ _arguments "${_arguments_options[@]}" : \
 _arguments "${_arguments_options[@]}" : \
 '--config=[Alternate config file. Defaults to the platform user config directory]:CONFIG:_files' \
 '--profile=[Named connection profile]:PROFILE:_default' \
+'--command-timeout=[Temporal CLI forwards this host-enforced timeout to extensions]:COMMAND_TIMEOUT:_default' \
 '--yes[]' \
 '-h[Print help]' \
 '--help[Print help]' \
@@ -143,6 +151,7 @@ _arguments "${_arguments_options[@]}" : \
 _arguments "${_arguments_options[@]}" : \
 '--config=[Alternate config file. Defaults to the platform user config directory]:CONFIG:_files' \
 '--profile=[Named connection profile]:PROFILE:_default' \
+'--command-timeout=[Temporal CLI forwards this host-enforced timeout to extensions]:COMMAND_TIMEOUT:_default' \
 '--yes[]' \
 '-h[Print help]' \
 '--help[Print help]' \
@@ -205,6 +214,7 @@ esac
 _arguments "${_arguments_options[@]}" : \
 '--config=[Alternate config file. Defaults to the platform user config directory]:CONFIG:_files' \
 '--profile=[Named connection profile]:PROFILE:_default' \
+'--command-timeout=[Temporal CLI forwards this host-enforced timeout to extensions]:COMMAND_TIMEOUT:_default' \
 '-h[Print help]' \
 '--help[Print help]' \
 ":: :_temporal-tui__subcmd__filter_commands" \
@@ -221,6 +231,7 @@ _arguments "${_arguments_options[@]}" : \
 _arguments "${_arguments_options[@]}" : \
 '--config=[Alternate config file. Defaults to the platform user config directory]:CONFIG:_files' \
 '--profile=[Named connection profile]:PROFILE:_default' \
+'--command-timeout=[Temporal CLI forwards this host-enforced timeout to extensions]:COMMAND_TIMEOUT:_default' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0
@@ -229,6 +240,7 @@ _arguments "${_arguments_options[@]}" : \
 _arguments "${_arguments_options[@]}" : \
 '--config=[Alternate config file. Defaults to the platform user config directory]:CONFIG:_files' \
 '--profile=[Named connection profile]:PROFILE:_default' \
+'--command-timeout=[Temporal CLI forwards this host-enforced timeout to extensions]:COMMAND_TIMEOUT:_default' \
 '--replace[]' \
 '-h[Print help]' \
 '--help[Print help]' \
@@ -240,6 +252,7 @@ _arguments "${_arguments_options[@]}" : \
 _arguments "${_arguments_options[@]}" : \
 '--config=[Alternate config file. Defaults to the platform user config directory]:CONFIG:_files' \
 '--profile=[Named connection profile]:PROFILE:_default' \
+'--command-timeout=[Temporal CLI forwards this host-enforced timeout to extensions]:COMMAND_TIMEOUT:_default' \
 '--yes[]' \
 '-h[Print help]' \
 '--help[Print help]' \
@@ -286,6 +299,7 @@ esac
 _arguments "${_arguments_options[@]}" : \
 '--config=[Alternate config file. Defaults to the platform user config directory]:CONFIG:_files' \
 '--profile=[Named connection profile]:PROFILE:_default' \
+'--command-timeout=[Temporal CLI forwards this host-enforced timeout to extensions]:COMMAND_TIMEOUT:_default' \
 '-h[Print help]' \
 '--help[Print help]' \
 ":: :_temporal-tui__subcmd__auth_commands" \
@@ -307,6 +321,7 @@ _arguments "${_arguments_options[@]}" : \
 '--namespace=[Namespace stored in a newly created profile]:NAMESPACE:_default' \
 '--config=[Alternate config file. Defaults to the platform user config directory]:CONFIG:_files' \
 '--profile=[Named connection profile]:PROFILE:_default' \
+'--command-timeout=[Temporal CLI forwards this host-enforced timeout to extensions]:COMMAND_TIMEOUT:_default' \
 '--password-stdin[Read the password from stdin instead of a terminal prompt]' \
 '--allow-http[Permit loopback-only HTTP for local development and tests]' \
 '--set-default[Make the selected profile the default]' \
@@ -318,6 +333,7 @@ _arguments "${_arguments_options[@]}" : \
 _arguments "${_arguments_options[@]}" : \
 '--config=[Alternate config file. Defaults to the platform user config directory]:CONFIG:_files' \
 '--profile=[Named connection profile]:PROFILE:_default' \
+'--command-timeout=[Temporal CLI forwards this host-enforced timeout to extensions]:COMMAND_TIMEOUT:_default' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0
@@ -326,6 +342,7 @@ _arguments "${_arguments_options[@]}" : \
 _arguments "${_arguments_options[@]}" : \
 '--config=[Alternate config file. Defaults to the platform user config directory]:CONFIG:_files' \
 '--profile=[Named connection profile]:PROFILE:_default' \
+'--command-timeout=[Temporal CLI forwards this host-enforced timeout to extensions]:COMMAND_TIMEOUT:_default' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0
@@ -370,6 +387,7 @@ esac
 _arguments "${_arguments_options[@]}" : \
 '--config=[Alternate config file. Defaults to the platform user config directory]:CONFIG:_files' \
 '--profile=[Named connection profile]:PROFILE:_default' \
+'--command-timeout=[Temporal CLI forwards this host-enforced timeout to extensions]:COMMAND_TIMEOUT:_default' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0

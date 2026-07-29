@@ -2,6 +2,7 @@
 set -euo pipefail
 
 archive="${1:?usage: package-smoke.sh ARCHIVE}"
+project_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 temporary_dir="$(mktemp -d)"
 trap 'rm -rf "${temporary_dir}"' EXIT
 extract_dir="${temporary_dir}/extract"
@@ -30,6 +31,13 @@ test -f "${package_root}/completions/temporal-tui.elv"
 install -m 0755 "${package_root}/temporal-tui" "${prefix}/bin/temporal-tui"
 PATH="${prefix}/bin:${PATH}" temporal-tui --version
 PATH="${prefix}/bin:${PATH}" temporal-tui --help >/dev/null
+if [[ -n "${TEMPORAL_CLI:-}" ]]; then
+  version="$("${prefix}/bin/temporal-tui" --version | awk '{ print $2 }')"
+  "${project_root}/scripts/temporal-cli-extension-smoke.sh" \
+    "${TEMPORAL_CLI}" \
+    "${prefix}/bin/temporal-tui" \
+    "${version}"
+fi
 
 # Simulate an upgrade from the published schema-1 config without using any
 # user-owned location or server.

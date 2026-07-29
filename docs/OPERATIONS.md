@@ -2,7 +2,7 @@
 
 ## Preflight
 
-1. Start with `temporal-tui --profile production --read-only`.
+1. Start with `temporal tui --profile production --read-only`.
 2. Confirm address, namespace, and `READ ONLY` in the header.
 3. Press `K`; inspect `RESTRICTED`, `UNAVAILABLE`, or `UNKNOWN` evidence.
 4. Verify Visibility queries and cursor pages before control mode.
@@ -15,15 +15,17 @@ For a protected self-hosted deployment, establish and verify the local session
 before the read-only preflight:
 
 ```sh
-temporal-tui --profile production auth login \
+temporal tui --profile production auth login \
   --url https://temporal.example.com \
   --username operator
-temporal-tui --profile production auth whoami
-temporal-tui --profile production --read-only
+temporal tui --profile production auth whoami
+temporal tui --profile production --read-only
 ```
 
 The login client is built in and the launched TUI connects directly to Temporal
-gRPC. No wrapper, plugin, or Temporal CLI process is part of the runtime path.
+gRPC. Temporal CLI only dispatches the extension and waits for it; it never
+proxies dashboard traffic. Standalone `temporal-tui` accepts the same arguments
+and has no Temporal CLI runtime dependency.
 
 ## Observation
 

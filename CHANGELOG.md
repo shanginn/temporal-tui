@@ -1,5 +1,27 @@
 # Changelog
 
+## 1.2.0 — 2026-07-29
+
+- Make `temporal tui` the preferred launch with Temporal CLI 1.8.1 or newer.
+  Temporal CLI discovers the installed `temporal-tui` executable through its
+  official `temporal-NAME` `PATH` extension convention.
+- Route the complete dashboard, profile, filter, and protected self-hosted
+  `auth login`/`whoami`/`logout` UX through the extension, with all TUI flags
+  placed after `tui`.
+- Keep `temporal-tui` fully supported as a standalone executable. Releases do
+  not bundle or require Temporal CLI, and Windows discovery uses the packaged
+  `temporal-tui.exe`.
+- Document extension discovery through `temporal help --all` and recovery for
+  version, `PATH`, argument-order, duplicate-installation, and Windows issues.
+- Accept Temporal CLI's forwarded `--command-timeout` for the read-only local
+  `config-path` command while rejecting unsafe forced interruption of the
+  dashboard, authentication, credential storage, config loading/migration, or
+  config mutations. Keep Temporal CLI config/env-file profiles separate from
+  TUI profiles while documenting inherited process variables such as
+  `TEMPORAL_PROFILE`.
+- Lower the Linux release baseline to glibc 2.35, statically link the Windows
+  MSVC runtime, and run Windows ZIP package smoke tests before release tags.
+
 ## 1.1.0 — 2026-07-29
 
 - Add native `auth login`, `auth whoami`, and `auth logout` for protected

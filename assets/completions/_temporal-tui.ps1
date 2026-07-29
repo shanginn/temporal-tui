@@ -23,6 +23,7 @@ Register-ArgumentCompleter -Native -CommandName 'temporal-tui' -ScriptBlock {
         'temporal-tui' {
             [CompletionResult]::new('--config', '--config', [CompletionResultType]::ParameterName, 'Alternate config file. Defaults to the platform user config directory')
             [CompletionResult]::new('--profile', '--profile', [CompletionResultType]::ParameterName, 'Named connection profile')
+            [CompletionResult]::new('--command-timeout', '--command-timeout', [CompletionResultType]::ParameterName, 'Temporal CLI forwards this host-enforced timeout to extensions')
             [CompletionResult]::new('--address', '--address', [CompletionResultType]::ParameterName, 'Temporal frontend address. A scheme is optional')
             [CompletionResult]::new('-n', '-n', [CompletionResultType]::ParameterName, 'Namespace selected at startup')
             [CompletionResult]::new('--namespace', '--namespace', [CompletionResultType]::ParameterName, 'Namespace selected at startup')
@@ -58,6 +59,7 @@ Register-ArgumentCompleter -Native -CommandName 'temporal-tui' -ScriptBlock {
         'temporal-tui;profile' {
             [CompletionResult]::new('--config', '--config', [CompletionResultType]::ParameterName, 'Alternate config file. Defaults to the platform user config directory')
             [CompletionResult]::new('--profile', '--profile', [CompletionResultType]::ParameterName, 'Named connection profile')
+            [CompletionResult]::new('--command-timeout', '--command-timeout', [CompletionResultType]::ParameterName, 'Temporal CLI forwards this host-enforced timeout to extensions')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('list', 'list', [CompletionResultType]::ParameterValue, 'List configured profiles without resolving secrets')
@@ -73,6 +75,7 @@ Register-ArgumentCompleter -Native -CommandName 'temporal-tui' -ScriptBlock {
         'temporal-tui;profile;list' {
             [CompletionResult]::new('--config', '--config', [CompletionResultType]::ParameterName, 'Alternate config file. Defaults to the platform user config directory')
             [CompletionResult]::new('--profile', '--profile', [CompletionResultType]::ParameterName, 'Named connection profile')
+            [CompletionResult]::new('--command-timeout', '--command-timeout', [CompletionResultType]::ParameterName, 'Temporal CLI forwards this host-enforced timeout to extensions')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
@@ -80,6 +83,7 @@ Register-ArgumentCompleter -Native -CommandName 'temporal-tui' -ScriptBlock {
         'temporal-tui;profile;show' {
             [CompletionResult]::new('--config', '--config', [CompletionResultType]::ParameterName, 'Alternate config file. Defaults to the platform user config directory')
             [CompletionResult]::new('--profile', '--profile', [CompletionResultType]::ParameterName, 'Named connection profile')
+            [CompletionResult]::new('--command-timeout', '--command-timeout', [CompletionResultType]::ParameterName, 'Temporal CLI forwards this host-enforced timeout to extensions')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
@@ -100,6 +104,7 @@ Register-ArgumentCompleter -Native -CommandName 'temporal-tui' -ScriptBlock {
             [CompletionResult]::new('--web-ui-url', '--web-ui-url', [CompletionResultType]::ParameterName, 'web-ui-url')
             [CompletionResult]::new('--config', '--config', [CompletionResultType]::ParameterName, 'Alternate config file. Defaults to the platform user config directory')
             [CompletionResult]::new('--profile', '--profile', [CompletionResultType]::ParameterName, 'Named connection profile')
+            [CompletionResult]::new('--command-timeout', '--command-timeout', [CompletionResultType]::ParameterName, 'Temporal CLI forwards this host-enforced timeout to extensions')
             [CompletionResult]::new('--tls', '--tls', [CompletionResultType]::ParameterName, 'tls')
             [CompletionResult]::new('--read-only', '--read-only', [CompletionResultType]::ParameterName, 'read-only')
             [CompletionResult]::new('--set-default', '--set-default', [CompletionResultType]::ParameterName, 'set-default')
@@ -111,6 +116,7 @@ Register-ArgumentCompleter -Native -CommandName 'temporal-tui' -ScriptBlock {
         'temporal-tui;profile;set-default' {
             [CompletionResult]::new('--config', '--config', [CompletionResultType]::ParameterName, 'Alternate config file. Defaults to the platform user config directory')
             [CompletionResult]::new('--profile', '--profile', [CompletionResultType]::ParameterName, 'Named connection profile')
+            [CompletionResult]::new('--command-timeout', '--command-timeout', [CompletionResultType]::ParameterName, 'Temporal CLI forwards this host-enforced timeout to extensions')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
@@ -119,6 +125,7 @@ Register-ArgumentCompleter -Native -CommandName 'temporal-tui' -ScriptBlock {
             [CompletionResult]::new('--from-env', '--from-env', [CompletionResultType]::ParameterName, 'Read the API key from this environment variable instead of prompting')
             [CompletionResult]::new('--config', '--config', [CompletionResultType]::ParameterName, 'Alternate config file. Defaults to the platform user config directory')
             [CompletionResult]::new('--profile', '--profile', [CompletionResultType]::ParameterName, 'Named connection profile')
+            [CompletionResult]::new('--command-timeout', '--command-timeout', [CompletionResultType]::ParameterName, 'Temporal CLI forwards this host-enforced timeout to extensions')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
@@ -126,6 +133,7 @@ Register-ArgumentCompleter -Native -CommandName 'temporal-tui' -ScriptBlock {
         'temporal-tui;profile;clear-api-key' {
             [CompletionResult]::new('--config', '--config', [CompletionResultType]::ParameterName, 'Alternate config file. Defaults to the platform user config directory')
             [CompletionResult]::new('--profile', '--profile', [CompletionResultType]::ParameterName, 'Named connection profile')
+            [CompletionResult]::new('--command-timeout', '--command-timeout', [CompletionResultType]::ParameterName, 'Temporal CLI forwards this host-enforced timeout to extensions')
             [CompletionResult]::new('--yes', '--yes', [CompletionResultType]::ParameterName, 'yes')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
@@ -134,6 +142,7 @@ Register-ArgumentCompleter -Native -CommandName 'temporal-tui' -ScriptBlock {
         'temporal-tui;profile;remove' {
             [CompletionResult]::new('--config', '--config', [CompletionResultType]::ParameterName, 'Alternate config file. Defaults to the platform user config directory')
             [CompletionResult]::new('--profile', '--profile', [CompletionResultType]::ParameterName, 'Named connection profile')
+            [CompletionResult]::new('--command-timeout', '--command-timeout', [CompletionResultType]::ParameterName, 'Temporal CLI forwards this host-enforced timeout to extensions')
             [CompletionResult]::new('--yes', '--yes', [CompletionResultType]::ParameterName, 'yes')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
@@ -177,6 +186,7 @@ Register-ArgumentCompleter -Native -CommandName 'temporal-tui' -ScriptBlock {
         'temporal-tui;filter' {
             [CompletionResult]::new('--config', '--config', [CompletionResultType]::ParameterName, 'Alternate config file. Defaults to the platform user config directory')
             [CompletionResult]::new('--profile', '--profile', [CompletionResultType]::ParameterName, 'Named connection profile')
+            [CompletionResult]::new('--command-timeout', '--command-timeout', [CompletionResultType]::ParameterName, 'Temporal CLI forwards this host-enforced timeout to extensions')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('list', 'list', [CompletionResultType]::ParameterValue, 'List saved visibility queries')
@@ -188,6 +198,7 @@ Register-ArgumentCompleter -Native -CommandName 'temporal-tui' -ScriptBlock {
         'temporal-tui;filter;list' {
             [CompletionResult]::new('--config', '--config', [CompletionResultType]::ParameterName, 'Alternate config file. Defaults to the platform user config directory')
             [CompletionResult]::new('--profile', '--profile', [CompletionResultType]::ParameterName, 'Named connection profile')
+            [CompletionResult]::new('--command-timeout', '--command-timeout', [CompletionResultType]::ParameterName, 'Temporal CLI forwards this host-enforced timeout to extensions')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
@@ -195,6 +206,7 @@ Register-ArgumentCompleter -Native -CommandName 'temporal-tui' -ScriptBlock {
         'temporal-tui;filter;save' {
             [CompletionResult]::new('--config', '--config', [CompletionResultType]::ParameterName, 'Alternate config file. Defaults to the platform user config directory')
             [CompletionResult]::new('--profile', '--profile', [CompletionResultType]::ParameterName, 'Named connection profile')
+            [CompletionResult]::new('--command-timeout', '--command-timeout', [CompletionResultType]::ParameterName, 'Temporal CLI forwards this host-enforced timeout to extensions')
             [CompletionResult]::new('--replace', '--replace', [CompletionResultType]::ParameterName, 'replace')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
@@ -203,6 +215,7 @@ Register-ArgumentCompleter -Native -CommandName 'temporal-tui' -ScriptBlock {
         'temporal-tui;filter;remove' {
             [CompletionResult]::new('--config', '--config', [CompletionResultType]::ParameterName, 'Alternate config file. Defaults to the platform user config directory')
             [CompletionResult]::new('--profile', '--profile', [CompletionResultType]::ParameterName, 'Named connection profile')
+            [CompletionResult]::new('--command-timeout', '--command-timeout', [CompletionResultType]::ParameterName, 'Temporal CLI forwards this host-enforced timeout to extensions')
             [CompletionResult]::new('--yes', '--yes', [CompletionResultType]::ParameterName, 'yes')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
@@ -230,6 +243,7 @@ Register-ArgumentCompleter -Native -CommandName 'temporal-tui' -ScriptBlock {
         'temporal-tui;auth' {
             [CompletionResult]::new('--config', '--config', [CompletionResultType]::ParameterName, 'Alternate config file. Defaults to the platform user config directory')
             [CompletionResult]::new('--profile', '--profile', [CompletionResultType]::ParameterName, 'Named connection profile')
+            [CompletionResult]::new('--command-timeout', '--command-timeout', [CompletionResultType]::ParameterName, 'Temporal CLI forwards this host-enforced timeout to extensions')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('login', 'login', [CompletionResultType]::ParameterValue, 'Sign in with a local username and a password read without echo')
@@ -246,6 +260,7 @@ Register-ArgumentCompleter -Native -CommandName 'temporal-tui' -ScriptBlock {
             [CompletionResult]::new('--namespace', '--namespace', [CompletionResultType]::ParameterName, 'Namespace stored in a newly created profile')
             [CompletionResult]::new('--config', '--config', [CompletionResultType]::ParameterName, 'Alternate config file. Defaults to the platform user config directory')
             [CompletionResult]::new('--profile', '--profile', [CompletionResultType]::ParameterName, 'Named connection profile')
+            [CompletionResult]::new('--command-timeout', '--command-timeout', [CompletionResultType]::ParameterName, 'Temporal CLI forwards this host-enforced timeout to extensions')
             [CompletionResult]::new('--password-stdin', '--password-stdin', [CompletionResultType]::ParameterName, 'Read the password from stdin instead of a terminal prompt')
             [CompletionResult]::new('--allow-http', '--allow-http', [CompletionResultType]::ParameterName, 'Permit loopback-only HTTP for local development and tests')
             [CompletionResult]::new('--set-default', '--set-default', [CompletionResultType]::ParameterName, 'Make the selected profile the default')
@@ -256,6 +271,7 @@ Register-ArgumentCompleter -Native -CommandName 'temporal-tui' -ScriptBlock {
         'temporal-tui;auth;whoami' {
             [CompletionResult]::new('--config', '--config', [CompletionResultType]::ParameterName, 'Alternate config file. Defaults to the platform user config directory')
             [CompletionResult]::new('--profile', '--profile', [CompletionResultType]::ParameterName, 'Named connection profile')
+            [CompletionResult]::new('--command-timeout', '--command-timeout', [CompletionResultType]::ParameterName, 'Temporal CLI forwards this host-enforced timeout to extensions')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
@@ -263,6 +279,7 @@ Register-ArgumentCompleter -Native -CommandName 'temporal-tui' -ScriptBlock {
         'temporal-tui;auth;logout' {
             [CompletionResult]::new('--config', '--config', [CompletionResultType]::ParameterName, 'Alternate config file. Defaults to the platform user config directory')
             [CompletionResult]::new('--profile', '--profile', [CompletionResultType]::ParameterName, 'Named connection profile')
+            [CompletionResult]::new('--command-timeout', '--command-timeout', [CompletionResultType]::ParameterName, 'Temporal CLI forwards this host-enforced timeout to extensions')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
@@ -289,6 +306,7 @@ Register-ArgumentCompleter -Native -CommandName 'temporal-tui' -ScriptBlock {
         'temporal-tui;config-path' {
             [CompletionResult]::new('--config', '--config', [CompletionResultType]::ParameterName, 'Alternate config file. Defaults to the platform user config directory')
             [CompletionResult]::new('--profile', '--profile', [CompletionResultType]::ParameterName, 'Named connection profile')
+            [CompletionResult]::new('--command-timeout', '--command-timeout', [CompletionResultType]::ParameterName, 'Temporal CLI forwards this host-enforced timeout to extensions')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break

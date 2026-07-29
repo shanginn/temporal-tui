@@ -100,6 +100,7 @@ impl CodecServer {
                         let response = read_http_request(&mut stream)
                             .and_then(|request| codec_response(&request))
                             .unwrap_or_else(|error| {
+                                eprintln!("disposable Codec Server rejected a request: {error}");
                                 (
                                     "400 Bad Request",
                                     serde_json::json!({"error": error}).to_string(),
@@ -1322,6 +1323,9 @@ fn start_control_workflow(
 }
 
 fn read_http_request(stream: &mut std::net::TcpStream) -> Result<String, String> {
+    stream
+        .set_nonblocking(false)
+        .map_err(|error| error.to_string())?;
     stream
         .set_read_timeout(Some(Duration::from_secs(2)))
         .map_err(|error| error.to_string())?;

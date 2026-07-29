@@ -78,6 +78,17 @@ the disposable-server contract both pass.
 - HTTPS, redirect/same-origin, loopback-development, config schema-3 migration,
   and isolated authentication acceptance contracts.
 
+### v1.2 — Temporal CLI extension
+
+- Preferred `temporal tui` launch through the official executable-extension
+  discovery in Temporal CLI 1.8.1 and newer.
+- Complete TUI flags, profile/filter commands, and protected self-hosted auth
+  commands after the `tui` subcommand.
+- Standalone `temporal-tui` compatibility with no bundled Temporal CLI or
+  runtime dependency.
+- Unix `temporal-tui` and Windows `temporal-tui.exe` `PATH` discovery,
+  `temporal help --all` visibility, and installation troubleshooting.
+
 ## Next
 
 ### v1.x — operator ergonomics
@@ -86,7 +97,7 @@ the disposable-server contract both pass.
 - Optional structured tracing export with explicit redaction policy.
 - Additional Temporal Cloud authorization test fixtures.
 
-### v1.2 — incident workflows
+### v1.3 — incident workflows
 
 - Cross-view bookmarks for Workflows, Task Queues, Deployments, and Batch jobs.
 - Compare two Workflow histories or Worker Deployment routing snapshots.

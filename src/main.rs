@@ -18,6 +18,7 @@ async fn main() -> Result<()> {
     init_tracing();
 
     let cli = Cli::parse();
+    cli.validate_command_timeout_safety()?;
     let store = ConfigStore::discover(cli.config.clone())?;
     if cli.run_config_command(&store).await? {
         return Ok(());

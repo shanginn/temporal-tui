@@ -35,6 +35,10 @@ pub struct Cli {
     #[arg(long, global = true, env = "TEMPORAL_PROFILE")]
     pub profile: Option<String>,
 
+    /// Temporal CLI forwards this host-enforced timeout to extensions.
+    #[arg(long, global = true, hide = true)]
+    pub command_timeout: Option<String>,
+
     /// Temporal frontend address. A scheme is optional.
     #[arg(long, env = "TEMPORAL_ADDRESS")]
     pub address: Option<String>,
@@ -276,6 +280,28 @@ pub struct LaunchAuth {
 }
 
 impl Cli {
+    /// Refuse host-enforced timeouts around interrupt-unsafe commands.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when Temporal CLI could forcibly kill the dashboard,
+    /// authentication, credential storage, config migration, or a config
+    /// mutation mid-operation.
+    pub fn validate_command_timeout_safety(&self) -> Result<()> {
+        if self.command_timeout.is_none() {
+            return Ok(());
+        }
+        if !matches!(&self.command, Some(CliCommand::ConfigPath)) {
+            bail!(
+                "--command-timeout is supported only for the read-only local `temporal tui \
+                 config-path` command; a forced timeout cannot safely interrupt the dashboard, \
+                 authentication, credential storage, config loading or migration, or config \
+                 mutations"
+            );
+        }
+        Ok(())
+    }
+
     /// Execute a config subcommand.
     ///
     /// Returns `true` when a subcommand was handled and the TUI must not start.
@@ -288,9 +314,12 @@ impl Cli {
         let Some(command) = &self.command else {
             return Ok(false);
         };
+        if matches!(command, CliCommand::ConfigPath) {
+            println!("{}", store.path().display());
+            return Ok(true);
+        }
         let mut config = store.load()?;
         match command {
-            CliCommand::ConfigPath => println!("{}", store.path().display()),
             CliCommand::Profile { command } => {
                 run_profile_command(command, store, &mut config)?;
             }
@@ -299,6 +328,9 @@ impl Cli {
             }
             CliCommand::Auth { command } => {
                 run_auth_command(command, self.profile.as_deref(), store, &mut config).await?;
+            }
+            CliCommand::ConfigPath => {
+                unreachable!("config-path returns before loading the config")
             }
         }
         Ok(true)
@@ -820,7 +852,8 @@ async fn run_auth_command(
                     "local development"
                 }
             );
-            println!("Run: temporal-tui --profile {profile_name}");
+            println!("Run: temporal tui --profile {profile_name}");
+            println!("Standalone: temporal-tui --profile {profile_name}");
         }
         AuthCommand::Whoami => {
             let profile = config
@@ -1200,6 +1233,95 @@ mod tests {
     fn rejects_unbounded_refresh_and_page_sizes() {
         assert!(Cli::try_parse_from(["temporal-tui", "--page-size", "0"]).is_err());
         assert!(Cli::try_parse_from(["temporal-tui", "--refresh-seconds", "3601"]).is_err());
+    }
+
+    #[test]
+    fn accepts_temporal_cli_command_timeout_passthrough() {
+        let cli = Cli::try_parse_from([
+            "temporal-tui",
+            "--command-timeout",
+            "5s",
+            "--profile",
+            "production",
+            "config-path",
+        ])
+        .unwrap();
+        assert_eq!(cli.command_timeout.as_deref(), Some("5s"));
+        assert_eq!(cli.profile.as_deref(), Some("production"));
+    }
+
+    #[test]
+    fn rejects_forced_timeout_for_interactive_terminal_safety() {
+        let cli = Cli::try_parse_from(["temporal-tui", "--command-timeout", "5s"]).unwrap();
+        let error = cli
+            .validate_command_timeout_safety()
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("cannot safely interrupt the dashboard"));
+    }
+
+    #[test]
+    fn rejects_forced_timeout_around_config_access_mutations_and_authentication() {
+        for arguments in [
+            vec!["temporal-tui", "--command-timeout", "5s", "profile", "list"],
+            vec!["temporal-tui", "--command-timeout", "5s", "filter", "list"],
+            vec![
+                "temporal-tui",
+                "--command-timeout",
+                "5s",
+                "auth",
+                "login",
+                "--url",
+                "https://temporal.example.com",
+                "--username",
+                "admin",
+                "--password-stdin",
+            ],
+            vec![
+                "temporal-tui",
+                "--command-timeout",
+                "5s",
+                "profile",
+                "set-api-key",
+                "production",
+                "--from-env",
+                "TEMPORAL_TEST_API_KEY",
+            ],
+            vec![
+                "temporal-tui",
+                "--command-timeout",
+                "5s",
+                "filter",
+                "save",
+                "stuck",
+                "ExecutionStatus = 'Running'",
+            ],
+        ] {
+            let cli = Cli::try_parse_from(arguments).unwrap();
+            let error = cli
+                .validate_command_timeout_safety()
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("cannot safely interrupt"));
+        }
+    }
+
+    #[test]
+    fn allows_forced_timeout_only_for_config_path() {
+        Cli::try_parse_from(["temporal-tui", "--command-timeout", "5s", "config-path"])
+            .unwrap()
+            .validate_command_timeout_safety()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn config_path_does_not_load_or_migrate_the_config() {
+        let (_directory, store, _config) = empty_store();
+        std::fs::write(store.path(), "this is not valid TOML").unwrap();
+        let cli = Cli::try_parse_from(["temporal-tui", "--command-timeout", "5s", "config-path"])
+            .unwrap();
+
+        assert!(cli.run_config_command(&store).await.unwrap());
     }
 
     #[test]

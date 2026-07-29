@@ -1,5 +1,21 @@
 # Troubleshooting
 
+## Temporal CLI extension discovery
+
+| Symptom | Check |
+| --- | --- |
+| `temporal tui` is unknown | Use Temporal CLI 1.8.1 or newer and place `temporal-tui` on the same `PATH`. Run `temporal help --all`; `tui` should be listed. |
+| TUI flag is rejected by Temporal CLI | Put every TUI flag after the extension name: `temporal tui --profile NAME --read-only`. |
+| Temporal CLI config/env-file profile is not used | Temporal CLI is the dispatcher only. Create a TUI profile with `temporal tui profile create ...`, then select it with `temporal tui --profile NAME`. Ordinary process variables are still inherited: unset or override `TEMPORAL_PROFILE` if it names a Temporal CLI profile rather than a TUI profile. |
+| A Temporal CLI global output/config flag is rejected | Use TUI-native flags after `tui` (`--no-color`, `--config`, and so on). The host-enforced `--command-timeout` is accepted only for the read-only local `config-path` command; forced interruption of the dashboard, authentication, credential storage, config loading/migration, and config mutations is rejected. |
+| Wrong `temporal-tui` is launched | Compare `temporal tui --version` with `temporal-tui --version`, then inspect shell command resolution for duplicate installations. |
+| Windows extension is not found | Confirm `temporal-tui.exe` is on `PATH` with `where.exe temporal-tui.exe`, then run `temporal.exe help --all`. |
+
+Temporal CLI discovers the executable by the official `temporal-NAME` naming
+convention; there is no registration file to repair. It is not bundled or
+required by `temporal-tui`. If extension discovery is unavailable, run
+`temporal-tui` directly with the same flags and subcommands.
+
 ## Connection and authentication
 
 | Symptom | Check |
@@ -9,7 +25,7 @@
 | `PermissionDenied` in `K` | The credential cannot call that read endpoint. Fix policy; unrelated views remain usable. |
 | Secret variable missing | Export the profile's exact variable or use `profile set-api-key`. |
 | Credential manager locked/unavailable | Unlock the OS store and retry. Local login cannot safely fall back to profile TOML; Linux headless sessions need a working Secret Service/keyring. |
-| Local session expired or revoked | Run `temporal-tui --profile NAME auth whoami`; if renewal is no longer valid, run `auth logout` and then `auth login` again. |
+| Local session expired or revoked | Run `temporal tui --profile NAME auth whoami`; if renewal is no longer valid, run `auth logout` and then `auth login` again. Standalone `temporal-tui` is equivalent. |
 | Login URL or redirect rejected | Use the HTTPS origin of the auth service. Advertised token endpoints must stay on that origin; redirects are never followed. |
 | `--allow-http` rejected | The hidden development switch accepts HTTP only for a loopback auth endpoint. Plaintext Temporal transport is also loopback-only; use TLS everywhere else. |
 

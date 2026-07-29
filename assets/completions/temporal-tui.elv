@@ -20,6 +20,7 @@ set edit:completion:arg-completer[temporal-tui] = {|@words|
         &'temporal-tui'= {
             cand --config 'Alternate config file. Defaults to the platform user config directory'
             cand --profile 'Named connection profile'
+            cand --command-timeout 'Temporal CLI forwards this host-enforced timeout to extensions'
             cand --address 'Temporal frontend address. A scheme is optional'
             cand -n 'Namespace selected at startup'
             cand --namespace 'Namespace selected at startup'
@@ -54,6 +55,7 @@ set edit:completion:arg-completer[temporal-tui] = {|@words|
         &'temporal-tui;profile'= {
             cand --config 'Alternate config file. Defaults to the platform user config directory'
             cand --profile 'Named connection profile'
+            cand --command-timeout 'Temporal CLI forwards this host-enforced timeout to extensions'
             cand -h 'Print help'
             cand --help 'Print help'
             cand list 'List configured profiles without resolving secrets'
@@ -68,12 +70,14 @@ set edit:completion:arg-completer[temporal-tui] = {|@words|
         &'temporal-tui;profile;list'= {
             cand --config 'Alternate config file. Defaults to the platform user config directory'
             cand --profile 'Named connection profile'
+            cand --command-timeout 'Temporal CLI forwards this host-enforced timeout to extensions'
             cand -h 'Print help'
             cand --help 'Print help'
         }
         &'temporal-tui;profile;show'= {
             cand --config 'Alternate config file. Defaults to the platform user config directory'
             cand --profile 'Named connection profile'
+            cand --command-timeout 'Temporal CLI forwards this host-enforced timeout to extensions'
             cand -h 'Print help'
             cand --help 'Print help'
         }
@@ -93,6 +97,7 @@ set edit:completion:arg-completer[temporal-tui] = {|@words|
             cand --web-ui-url 'web-ui-url'
             cand --config 'Alternate config file. Defaults to the platform user config directory'
             cand --profile 'Named connection profile'
+            cand --command-timeout 'Temporal CLI forwards this host-enforced timeout to extensions'
             cand --tls 'tls'
             cand --read-only 'read-only'
             cand --set-default 'set-default'
@@ -103,6 +108,7 @@ set edit:completion:arg-completer[temporal-tui] = {|@words|
         &'temporal-tui;profile;set-default'= {
             cand --config 'Alternate config file. Defaults to the platform user config directory'
             cand --profile 'Named connection profile'
+            cand --command-timeout 'Temporal CLI forwards this host-enforced timeout to extensions'
             cand -h 'Print help'
             cand --help 'Print help'
         }
@@ -110,12 +116,14 @@ set edit:completion:arg-completer[temporal-tui] = {|@words|
             cand --from-env 'Read the API key from this environment variable instead of prompting'
             cand --config 'Alternate config file. Defaults to the platform user config directory'
             cand --profile 'Named connection profile'
+            cand --command-timeout 'Temporal CLI forwards this host-enforced timeout to extensions'
             cand -h 'Print help'
             cand --help 'Print help'
         }
         &'temporal-tui;profile;clear-api-key'= {
             cand --config 'Alternate config file. Defaults to the platform user config directory'
             cand --profile 'Named connection profile'
+            cand --command-timeout 'Temporal CLI forwards this host-enforced timeout to extensions'
             cand --yes 'yes'
             cand -h 'Print help'
             cand --help 'Print help'
@@ -123,6 +131,7 @@ set edit:completion:arg-completer[temporal-tui] = {|@words|
         &'temporal-tui;profile;remove'= {
             cand --config 'Alternate config file. Defaults to the platform user config directory'
             cand --profile 'Named connection profile'
+            cand --command-timeout 'Temporal CLI forwards this host-enforced timeout to extensions'
             cand --yes 'yes'
             cand -h 'Print help'
             cand --help 'Print help'
@@ -156,6 +165,7 @@ set edit:completion:arg-completer[temporal-tui] = {|@words|
         &'temporal-tui;filter'= {
             cand --config 'Alternate config file. Defaults to the platform user config directory'
             cand --profile 'Named connection profile'
+            cand --command-timeout 'Temporal CLI forwards this host-enforced timeout to extensions'
             cand -h 'Print help'
             cand --help 'Print help'
             cand list 'List saved visibility queries'
@@ -166,12 +176,14 @@ set edit:completion:arg-completer[temporal-tui] = {|@words|
         &'temporal-tui;filter;list'= {
             cand --config 'Alternate config file. Defaults to the platform user config directory'
             cand --profile 'Named connection profile'
+            cand --command-timeout 'Temporal CLI forwards this host-enforced timeout to extensions'
             cand -h 'Print help'
             cand --help 'Print help'
         }
         &'temporal-tui;filter;save'= {
             cand --config 'Alternate config file. Defaults to the platform user config directory'
             cand --profile 'Named connection profile'
+            cand --command-timeout 'Temporal CLI forwards this host-enforced timeout to extensions'
             cand --replace 'replace'
             cand -h 'Print help'
             cand --help 'Print help'
@@ -179,6 +191,7 @@ set edit:completion:arg-completer[temporal-tui] = {|@words|
         &'temporal-tui;filter;remove'= {
             cand --config 'Alternate config file. Defaults to the platform user config directory'
             cand --profile 'Named connection profile'
+            cand --command-timeout 'Temporal CLI forwards this host-enforced timeout to extensions'
             cand --yes 'yes'
             cand -h 'Print help'
             cand --help 'Print help'
@@ -200,6 +213,7 @@ set edit:completion:arg-completer[temporal-tui] = {|@words|
         &'temporal-tui;auth'= {
             cand --config 'Alternate config file. Defaults to the platform user config directory'
             cand --profile 'Named connection profile'
+            cand --command-timeout 'Temporal CLI forwards this host-enforced timeout to extensions'
             cand -h 'Print help'
             cand --help 'Print help'
             cand login 'Sign in with a local username and a password read without echo'
@@ -215,6 +229,7 @@ set edit:completion:arg-completer[temporal-tui] = {|@words|
             cand --namespace 'Namespace stored in a newly created profile'
             cand --config 'Alternate config file. Defaults to the platform user config directory'
             cand --profile 'Named connection profile'
+            cand --command-timeout 'Temporal CLI forwards this host-enforced timeout to extensions'
             cand --password-stdin 'Read the password from stdin instead of a terminal prompt'
             cand --allow-http 'Permit loopback-only HTTP for local development and tests'
             cand --set-default 'Make the selected profile the default'
@@ -224,12 +239,14 @@ set edit:completion:arg-completer[temporal-tui] = {|@words|
         &'temporal-tui;auth;whoami'= {
             cand --config 'Alternate config file. Defaults to the platform user config directory'
             cand --profile 'Named connection profile'
+            cand --command-timeout 'Temporal CLI forwards this host-enforced timeout to extensions'
             cand -h 'Print help'
             cand --help 'Print help'
         }
         &'temporal-tui;auth;logout'= {
             cand --config 'Alternate config file. Defaults to the platform user config directory'
             cand --profile 'Named connection profile'
+            cand --command-timeout 'Temporal CLI forwards this host-enforced timeout to extensions'
             cand -h 'Print help'
             cand --help 'Print help'
         }
@@ -250,6 +267,7 @@ set edit:completion:arg-completer[temporal-tui] = {|@words|
         &'temporal-tui;config-path'= {
             cand --config 'Alternate config file. Defaults to the platform user config directory'
             cand --profile 'Named connection profile'
+            cand --command-timeout 'Temporal CLI forwards this host-enforced timeout to extensions'
             cand -h 'Print help'
             cand --help 'Print help'
         }
