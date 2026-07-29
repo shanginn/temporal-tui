@@ -78,8 +78,10 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: scripts/install-temporal-cli.ps1
-      - name: Cache Rust build
+      - name: Cache Rust registry without runner-bound target artifacts
         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          cache-targets: false
       - name: Run tests
         run: cargo test --locked --all-targets --all-features
       - name: Build optimized binary
